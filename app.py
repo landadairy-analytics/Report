@@ -2,7 +2,6 @@ import io
 import pandas as pd
 import streamlit as st
 
-# Ρυθμίσεις σελίδας Streamlit
 st.set_page_config(
     page_title="Αναφορά Ωρών Εργασίας & Υπερωριών", page_icon="⏱️", layout="wide"
 )
@@ -13,28 +12,20 @@ st.write(
     " αυτόματα το HTML report."
 )
 
-# Κουμπί μεταφόρτωσης αρχείου (Drag & Drop ή επιλογή)
 uploaded_file = st.file_uploader("Επιλέξτε αρχείο CSV", type=["csv", "txt"])
 
 if uploaded_file is not None:
     try:
-        # 1. Ανάγνωση του CSV
         df = pd.read_csv(uploaded_file, sep="\t", encoding="utf-16", engine="python")
-
-        # Καθαρισμός κενών από τα ονόματα των στηλών
         df.columns = df.columns.str.strip()
 
-        # 2. Μετατροπή της στήλης DateTime
         df["DateTime"] = pd.to_datetime(
             df["DateTime"].astype(str).str.strip(),
             format="%Y/%m/%d %H:%M:%S",
             errors="coerce",
         )
-
-        # Καθαρισμός κενών από τη στήλη 'Name'
         df["Name"] = df["Name"].astype(str).str.strip()
 
-        # 3. ΔΙΟΡΘΩΣΗ ΓΙΑ ΝΥΧΤΕΡΙΝΕΣ ΒΑΡΔΙΕΣ ΜΕΤΑ ΤΙΣ 12:00 ΕΩΣ 02:00
         def adjust_night_shift_date(row):
             dt = row["DateTime"]
             if pd.isna(dt):
@@ -46,14 +37,12 @@ if uploaded_file is not None:
 
         df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
-        # 4. Υπολογισμός Ελάχιστης και Μέγιστης ώρας ανά εργαζόμενο και ημέρα
         daily_summary = (
             df.groupby(["Name", "Date"])["DateTime"]
             .agg(Arrival="min", Departure="max", Hit_Count="count")
             .reset_index()
         )
 
-        # Προσθήκη στήλης με την ημέρα της εβδομάδας (στα Ελληνικά)
         days_map = {
             0: "Δευτέρα",
             1: "Τρίτη",
@@ -66,13 +55,10 @@ if uploaded_file is not None:
         daily_summary["Day_Name"] = (
             pd.to_datetime(daily_summary["Date"]).dt.dayofweek.map(days_map)
         )
-
-        # Δείκτης για Σάββατο (5) ή Κυριακή (6) μαζί
         daily_summary["Is_Weekend"] = (
             pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
         ).astype(int)
 
-        # 5. Λογική υπολογισμού ανάλογα με τα χτυπήματα
         def calculate_hours_and_notes(row):
             hits = row["Hit_Count"]
             if hits == 1:
@@ -94,7 +80,6 @@ if uploaded_file is not None:
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
 
-        # Βοηθητική συνάρτηση μετατροπής σε "X ώρες Y λεπτά"
         def format_hours_minutes(decimal_hours):
             if pd.isna(decimal_hours) or decimal_hours <= 0:
                 return "0 ώρες 0 λεπτά"
@@ -103,9 +88,8 @@ if uploaded_file is not None:
             if minutes == 60:
                 hours += 1
                 minutes = 0
-            return f"{hours} ώρες {minutes} λεπτά"
+            return str(hours) + " ώρες " + str(minutes) + " λεπτά"
 
-        # 6. Δημιουργία αθροιστικού πίνακα ανά άτομο
         monthly_summary = (
             daily_summary.groupby("Name")
             .agg(
@@ -116,7 +100,6 @@ if uploaded_file is not None:
             .reset_index()
         )
 
-        # Εφαρμογή της μορφοποίησης ωρών
         daily_summary["Hours_Worked"] = daily_summary["Hours_Decimal"].apply(
             format_hours_minutes
         )
@@ -131,7 +114,6 @@ if uploaded_file is not None:
             "Overtime_Decimal"
         ].apply(format_hours_minutes)
 
-        # Αφαίρεση βοηθητικών στηλών
         daily_summary_clean = daily_summary.drop(
             columns=[
                 "Hours_Decimal",
@@ -144,7 +126,6 @@ if uploaded_file is not None:
             columns=["Hours_Decimal", "Overtime_Decimal"]
         )
 
-        # 7. ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
         monthly_summary_clean = monthly_summary_clean.rename(
             columns={
                 "Name": "Όνομα Εργαζομένου",
@@ -154,49 +135,4 @@ if uploaded_file is not None:
             }
         )
 
-        daily_summary_clean = daily_summary_clean.rename(
-            columns={
-                "Name": "Όνομα Εργαζομένου",
-                "Date": "Ημερομηνία",
-                "Day_Name": "Ημέρα",
-                "Arrival": "Ώρα Άφιξης",
-                "Departure": "Ώρα Aποχώρησης",
-                "Hours_Worked": "Ώρες Εργασίας",
-                "Overtime": "Ώρες Υπερωρίας",
-            }
-        )
-
-        # 8. Δημιουργία του HTML περιεχομένου
-        html_template = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <title>Αναφορά Ωρών Εργασίας & Υπερωριών</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 30px; background-color: #f9f9f9; color: #333; }
-            h1, h2 { color: #2c3e50; border-bottom: 2px solid #34495e; padding-bottom: 8px; }
-            table { width: 100%; border-collapse: collapse; margin-bottom: 40px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
-            th { background-color: #2c3e50; color: white; }
-            tr:hover { background-color: #f1f1f1; }
-        </style>
-        </head>
-        <body>
-            <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
-            
-            <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
-            __MONTHLY_TABLE__
-            
-            <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
-            __DAILY_TABLE__
-        </body>
-        </html>
-        """
-
-        html_content = html_template.replace(
-            "__MONTHLY_TABLE__",
-            monthly_summary_clean.to_html(index=False, classes="table"),
-        )
-        html_content = html_content.replace(
-            "
+        daily_summary_clean = daily_summary
