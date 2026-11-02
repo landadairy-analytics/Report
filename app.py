@@ -34,30 +34,31 @@ if uploaded_file is not None:
     # Καθαρισμός κενών από τη στήλη 'Name'
     df["Name"] = df["Name"].astype(str).str.strip()
 
-
-    # -------------------------------------------------------------
     # ΔΙΟΡΘΩΣΗ ΓΙΑ ΝΥΧΤΕΡΙΝΕΣ ΒΑΡΔΙΕΣ ΜΕΤΑ ΤΙΣ 12:00 ΕΩΣ 02:00
-    # -------------------------------------------------------------
     def adjust_night_shift_date(row):
       dt = row["DateTime"]
       if pd.isna(dt):
         return pd.NaT
-      # Αν η ώρα είναι 00:00 έως 02:00 το πρωί
       if dt.hour < 2:
         return (dt - pd.Timedelta(days=1)).date()
       else:
         return dt.date()
 
-
-    # Δημιουργία στήλης 'Date' με τη διορθωμένη λογική
     df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
-    # 5. Υπολογισμός Ελάχιστης (Άφιξη) και Μέγιστης (Αποχώρηση) ώρας ανά ημέρα
+    # 5. Έλεγχος χτυπημάτων ανά ημέρα (πόσα χτυπήματα έχει ο καθένας την ημέρα)
+    # Αν έχει ακριβώς 1 χτύπημα, σημαίνει ότι ξέχασε την άφιξη ή την αποχώρηση.
+    counts = df.groupby(["Name", "Date"]).size().reset_index(name="Hit_Count")
+
+    # Υπολογισμός Ελάχιστης και Μέγιστης ώρας
     daily_summary = (
         df.groupby(["Name", "Date"])["DateTime"]
         .agg(Arrival="min", Departure="max")
         .reset_index()
     )
+
+    # Ενσωμάτωση του πλήθους χτυπημάτων
+    daily_summary = pd.merge(daily_summary, counts, on=["Name", "Date"])
 
     # Προσθήκη στήλης με την ημέρα της εβδομάδας (στα Ελληνικά)
     days_map = {
@@ -73,20 +74,35 @@ if uploaded_file is not None:
         pd.to_datetime(daily_summary["Date"]).dt.dayofweek.map(days_map)
     )
 
-    # Δείκτης για Σάββατο (5) ή Κυριακή (6) μαζί (1 αν είναι Σ-Κ, 0 αλλιώς)
+    # Δείκτης για Σάββατο (5) ή Κυριακή (6) μαζί
     daily_summary["Is_Weekend"] = (
         pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
     ).astype(int)
 
-    # 6. Υπολογισμός ωρών εργασίας (σε δεκαδική μορφή)
-    daily_summary["Hours_Decimal"] = (
-        daily_summary["Departure"] - daily_summary["Arrival"]
-    ).dt.total_seconds() / 3600
+    # 6. Υπολογισμός ωρών εργασίας & διαχείρισης "ξεχασμένου χτυπήματος"
+    def calculate_hours_and_notes(row):
+      # Αν έχει μόνο 1 χτύπημα (άρα ξέχασε είτε άφιξη είτε αποχώρηση)
+      if row["Hit_Count"] == 1:
+        # Θεωρούμε αυτόματα 10 ώρες (δεν βγάζουμε υπερωρία)
+        return 10.0, 0.0, "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν"
+      else:
+        # Κανονικός υπολογισμός από min έως max
+        hours = (row["Departure"] - row["Arrival"]).total_seconds() / 3600
+        if hours < 0:
+          hours = 0.0
+        overtime = max(0, hours - 10)
+        return hours, overtime, ""
 
-    # 7. Υπολογισμός Υπερωρίας (πάνω από 10 ώρες)
-    daily_summary["Overtime_Decimal"] = daily_summary["Hours_Decimal"].apply(
-        lambda x: max(0, x - 10)
-    )
+
+    # Εφαρμογή της λογικής γραμμή-γραμμή
+    res = daily_summary.apply(calculate_hours_and_notes, axis=1)
+    daily_summary["Hours_Decimal"] = [r[0] for r in res]
+    daily_summary["Overtime_Decimal"] = [r[1] for r in res]
+    daily_summary["Παρατηρήσεις"] = [r[2] for r in res]
+
+    # Αν έλειπε το χτύπημα, βάζουμε κενή ένδειξη στις ώρες άφιξης/αποχώρησης για να μην φαίνονται λάθος
+    daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
+    daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
 
 
     # Βοηθητική συνάρτηση μετατροπής σε "X ώρες Y λεπτά"
@@ -101,7 +117,7 @@ if uploaded_file is not None:
       return f"{hours} ώρες {minutes} λεπτά"
 
 
-    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο με ενιαία στήλη για Σ-Κ
+    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο
     monthly_summary = (
         daily_summary.groupby("Name")
         .agg(
@@ -129,7 +145,12 @@ if uploaded_file is not None:
 
     # Αφαίρεση βοηθητικών στηλών
     daily_summary_clean = daily_summary.drop(
-        columns=["Hours_Decimal", "Overtime_Decimal", "Is_Weekend"]
+        columns=[
+            "Hours_Decimal",
+            "Overtime_Decimal",
+            "Is_Weekend",
+            "Hit_Count",
+        ]
     )
     monthly_summary_clean = monthly_summary.drop(
         columns=["Hours_Decimal", "Overtime_Decimal"]
@@ -198,13 +219,4 @@ if uploaded_file is not None:
 
     # 10. Κουμπί λήψης του αρχείου HTML για τον χρήστη
     st.download_button(
-        label="📥 Λήψη HTML Report",
-        data=html_content,
-        file_name="Work_and_Overtime_Summary.html",
-        mime="text/html",
-    )
-
-  except Exception as e:
-    st.error(
-        f"Προέκυψε κάποιο σφάλμα κατά την επεξεργασία του αρχείου: {e}"
-    )
+        label="📥 Λή
