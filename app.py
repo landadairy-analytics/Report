@@ -46,18 +46,12 @@ if uploaded_file is not None:
 
         df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
-        # 4. Έλεγχος χτυπημάτων ανά ημέρα
-        counts = df.groupby(["Name", "Date"]).size().reset_index(name="Hit_Count")
-
-        # Υπολογισμός Ελάχιστης και Μέγιστης ώρας
+        # 4. Υπολογισμός Ελάχιστης και Μέγιστης ώρας ανά εργαζόμενο και ημέρα
         daily_summary = (
             df.groupby(["Name", "Date"])["DateTime"]
-            .agg(Arrival="min", Departure="max")
+            .agg(Arrival="min", Departure="max", Hit_Count="count")
             .reset_index()
         )
-
-        # Ενσωμάτωση πλήθους χτυπημάτων
-        daily_summary = pd.merge(daily_summary, counts, on=["Name", "Date"])
 
         # Προσθήκη στήλης με την ημέρα της εβδομάδας (στα Ελληνικά)
         days_map = {
@@ -78,22 +72,28 @@ if uploaded_file is not None:
             pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
         ).astype(int)
 
-        # 5. Υπολογισμός ωρών εργασίας & διαχείρισης "ξεχασμένου χτυπήματος"
+        # 5. Λογική υπολογισμού ανάλογα με τα χτυπήματα
         def calculate_hours_and_notes(row):
-            if row["Hit_Count"] == 1:
+            hits = row["Hit_Count"]
+            if hits == 1:
+                # Μόνο 1 χτύπημα -> Ξέχασαν να χτυπήσουν (υπολογίζουμε 10ωρο)
                 return 10.0, 0.0, "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν"
-            else:
+            elif hits >= 2:
+                # Κανονικά χτυπήματα
                 hours = (row["Departure"] - row["Arrival"]).total_seconds() / 3600
                 if hours < 0:
                     hours = 0.0
                 overtime = max(0, hours - 10)
                 return hours, overtime, ""
+            else:
+                return 0.0, 0.0, ""
 
         res = daily_summary.apply(calculate_hours_and_notes, axis=1)
         daily_summary["Hours_Decimal"] = [r[0] for r in res]
         daily_summary["Overtime_Decimal"] = [r[1] for r in res]
         daily_summary["Παρατηρήσεις"] = [r[2] for r in res]
 
+        # Αν έχει ακριβώς 1 χτύπημα, αποκρύπτουμε τις ώρες άφιξης/αποχώρησης γιατί είναι ελλιπείς
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
 
@@ -201,12 +201,12 @@ if uploaded_file is not None:
             "Το αρχείο επεξεργάστηκε επιτυχώς και το HTML report είναι έτοιμο!"
         )
 
-        # Εμφάνιση προεπισκόπησης στην οθόνη
-        st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
-        st.dataframe(monthly_summary_clean, use_container_width=True)
+    # Εμφάνιση προεπισκόπησης στην οθόνη
+    st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
+    st.dataframe(monthly_summary_clean, use_container_width=True)
 
-        st.subheader("📅 Αναλυτική Ημερήσια Καταγραφή")
-        st.dataframe(daily_summary_clean, use_container_width=True)
+    st.subheader("📅 Αναλυτική Ημερήσια Καταγραφή")
+    st.dataframe(daily_summary_clean, use_container_width=True)
 
         # 9. Κουμπί λήψης του αρχείου HTML για τον χρήστη
         st.download_button(
