@@ -76,10 +76,8 @@ if uploaded_file is not None:
         def calculate_hours_and_notes(row):
             hits = row["Hit_Count"]
             if hits == 1:
-                # Μόνο 1 χτύπημα -> Ξέχασαν να χτυπήσουν (υπολογίζουμε 10ωρο)
                 return 10.0, 0.0, "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν"
             elif hits >= 2:
-                # Κανονικά χτυπήματα
                 hours = (row["Departure"] - row["Arrival"]).total_seconds() / 3600
                 if hours < 0:
                     hours = 0.0
@@ -93,7 +91,6 @@ if uploaded_file is not None:
         daily_summary["Overtime_Decimal"] = [r[1] for r in res]
         daily_summary["Παρατηρήσεις"] = [r[2] for r in res]
 
-        # Αν έχει ακριβώς 1 χτύπημα, αποκρύπτουμε τις ώρες άφιξης/αποχώρησης γιατί είναι ελλιπείς
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
         daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
 
@@ -130,55 +127,4 @@ if uploaded_file is not None:
         monthly_summary["Total_Hours"] = monthly_summary["Hours_Decimal"].apply(
             format_hours_minutes
         )
-        monthly_summary["Total_Overtime"] = monthly_summary[
-            "Overtime_Decimal"
-        ].apply(format_hours_minutes)
-
-        # Αφαίρεση βοηθητικών στηλών
-        daily_summary_clean = daily_summary.drop(
-            columns=[
-                "Hours_Decimal",
-                "Overtime_Decimal",
-                "Is_Weekend",
-                "Hit_Count",
-            ]
-        )
-        monthly_summary_clean = monthly_summary.drop(
-            columns=["Hours_Decimal", "Overtime_Decimal"]
-        )
-
-        # 7. ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
-        monthly_summary_clean = monthly_summary_clean.rename(
-            columns={
-                "Name": "Όνομα Εργαζομένου",
-                "Total_Hours": "Συνολικές Ώρες",
-                "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
-                "Weekend_Count": "Ημέρες Σ-Κ",
-            }
-        )
-
-        daily_summary_clean = daily_summary_clean.rename(
-            columns={
-                "Name": "Όνομα Εργαζομένου",
-                "Date": "Ημερομηνία",
-                "Day_Name": "Ημέρα",
-                "Arrival": "Ώρα Άφιξης",
-                "Departure": "Ώρα Aποχώρησης",
-                "Hours_Worked": "Ώρες Εργασίας",
-                "Overtime": "Ώρες Υπερωρίας",
-            }
-        )
-
-        # 8. Δημιουργία του HTML περιεχομένου
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <title>Αναφορά Ωρών Εργασίας & Υπερωριών</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 30px; background-color: #f9f9f9; color: #333; }}
-            h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #34495e; padding-bottom: 8px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-bottom: 40px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-            th, td {{ padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }}
-            th {{ background-color: #2c3e50; color: white; }}
+        monthly_
