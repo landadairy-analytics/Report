@@ -135,4 +135,64 @@ if uploaded_file is not None:
             }
         )
 
-        daily_summary_clean = daily_summary
+        daily_summary_clean = daily_summary_clean.rename(
+            columns={
+                "Name": "Όνομα Εργαζομένου",
+                "Date": "Ημερομηνία",
+                "Day_Name": "Ημέρα",
+                "Arrival": "Ώρα Άφιξης",
+                "Departure": "Ώρα Aποχώρησης",
+                "Hours_Worked": "Ώρες Εργασίας",
+                "Overtime": "Ώρες Υπερωρίας",
+            }
+        )
+
+        html_template = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Αναφορά Ωρών Εργασίας & Υπερωριών</title>
+<style>
+    body { font-family: Arial, sans-serif; margin: 30px; background-color: #f9f9f9; color: #333; }
+    h1, h2 { color: #2c3e50; border-bottom: 2px solid #34495e; padding-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 40px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
+    th { background-color: #2c3e50; color: white; }
+    tr:hover { background-color: #f1f1f1; }
+</style>
+</head>
+<body>
+    <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
+    <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
+    __MONTHLY_TABLE__
+    <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
+    __DAILY_TABLE__
+</body>
+</html>"""
+
+        html_content = html_template.replace(
+            "__MONTHLY_TABLE__",
+            monthly_summary_clean.to_html(index=False, classes="table"),
+        )
+        html_content = html_content.replace(
+            "__DAILY_TABLE__",
+            daily_summary_clean.to_html(index=False, classes="table"),
+        )
+
+        st.success("Το αρχείο επεξεργάστηκε επιτυχώς!")
+
+        st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
+        st.dataframe(monthly_summary_clean, use_container_width=True)
+
+        st.subheader("📅 Αναλυτική Ημερήσια Καταγραφή")
+        st.dataframe(daily_summary_clean, use_container_width=True)
+
+        st.download_button(
+            label="Λήψη HTML Report",
+            data=html_content,
+            file_name="Work_and_Overtime_Summary.html",
+            mime="text/html",
+        )
+
+    except Exception as e:
+        st.error("Προέκυψε σφάλμα κατά την επεξεργασία: " + str(e))
