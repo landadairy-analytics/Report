@@ -58,12 +58,9 @@ if uploaded_file is not None:
         pd.to_datetime(daily_summary["Date"]).dt.dayofweek.map(days_map)
     )
 
-    # Ειδικές στήλες-δείκτες για Σάββατο και Κυριακή (1 αν είναι, 0 αλλιώς)
-    daily_summary["Is_Saturday"] = (
-        pd.to_datetime(daily_summary["Date"]).dt.dayofweek == 5
-    ).astype(int)
-    daily_summary["Is_Sunday"] = (
-        pd.to_datetime(daily_summary["Date"]).dt.dayofweek == 6
+    # Δείκτης για Σάββατο (5) ή Κυριακή (6) μαζί (1 αν είναι Σ-Κ, 0 αλλιώς)
+    daily_summary["Is_Weekend"] = (
+        pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
     ).astype(int)
 
     # 6. Υπολογισμός ωρών εργασίας (σε δεκαδική μορφή)
@@ -87,14 +84,13 @@ if uploaded_file is not None:
         minutes = 0
       return f"{hours} ώρες {minutes} λεπτά"
 
-    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο (συμπεριλαμβανομένων Σαββάτων & Κυριακών)
+    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο με ενιαία στήλη για Σ-Κ
     monthly_summary = (
         daily_summary.groupby("Name")
         .agg(
             Hours_Decimal=("Hours_Decimal", "sum"),
             Overtime_Decimal=("Overtime_Decimal", "sum"),
-            Saturday_Count=("Is_Saturday", "sum"),
-            Sunday_Count=("Is_Sunday", "sum"),
+            Weekend_Count=("Is_Weekend", "sum"),
         )
         .reset_index()
     )
@@ -114,14 +110,9 @@ if uploaded_file is not None:
         "Overtime_Decimal"
     ].apply(format_hours_minutes)
 
-    # Αφαίρεση βοηθητικών στηλών και μετονομασία
+    # Αφαίρεση βοηθητικών στηλών
     daily_summary_clean = daily_summary.drop(
-        columns=[
-            "Hours_Decimal",
-            "Overtime_Decimal",
-            "Is_Saturday",
-            "Is_Sunday",
-        ]
+        columns=["Hours_Decimal", "Overtime_Decimal", "Is_Weekend"]
     )
     monthly_summary_clean = monthly_summary.drop(
         columns=["Hours_Decimal", "Overtime_Decimal"]
@@ -135,8 +126,7 @@ if uploaded_file is not None:
             "Name": "Όνομα Εργαζομένου",
             "Total_Hours": "Συνολικές Ώρες",
             "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
-            "Saturday_Count": "Ημέρες Σάββατο",
-            "Sunday_Count": "Ημέρες Κυριακή",
+            "Weekend_Count": "Ημέρες Σ-Κ",
         }
     )
 
