@@ -37,14 +37,13 @@ if uploaded_file is not None:
 
         df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
-        # -------------------------------------------------------------
-        # ΔΙΟΡΘΩΣΗ: Κρατάμε ΜΟΝΟ τις γραμμές με έγκυρη ημερομηνία και ώρα
-        # -------------------------------------------------------------
         df_valid = df.dropna(subset=["DateTime", "Date"]).copy()
 
+        # Αντί για min/max γενικά, θα βρούμε πόσα χτυπήματα υπάρχουν
+        # και ποια είναι η πρώτη/τελευταία ώρα ανά μέρα
         daily_summary = (
             df_valid.groupby(["Name", "Date"])["DateTime"]
-            .agg(Arrival="min", Departure="max", Hit_Count="count")
+            .agg(First_Hit="min", Last_Hit="max", Hit_Count="count")
             .reset_index()
         )
 
@@ -67,23 +66,32 @@ if uploaded_file is not None:
         def calculate_hours_and_notes(row):
             hits = row["Hit_Count"]
             if hits == 1:
-                return 10.0, 0.0, "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν"
+                # 1 χτύπημα: Υπολογίζουμε 10ωρο και βάζουμε παρατήρηση
+                return (
+                    row["First_Hit"],
+                    pd.NaT,
+                    10.0,
+                    0.0,
+                    "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν",
+                )
             elif hits >= 2:
-                hours = (row["Departure"] - row["Arrival"]).total_seconds() / 3600
+                # Κανονικά χτυπήματα (Άφιξη = First, Αποχώρηση = Last)
+                arr = row["First_Hit"]
+                dep = row["Last_Hit"]
+                hours = (dep - arr).total_seconds() / 3600
                 if hours < 0:
                     hours = 0.0
                 overtime = max(0, hours - 10)
-                return hours, overtime, ""
+                return arr, dep, hours, overtime, ""
             else:
-                return 0.0, 0.0, ""
+                return pd.NaT, pd.NaT, 0.0, 0.0, ""
 
         res = daily_summary.apply(calculate_hours_and_notes, axis=1)
-        daily_summary["Hours_Decimal"] = [r[0] for r in res]
-        daily_summary["Overtime_Decimal"] = [r[1] for r in res]
-        daily_summary["Παρατηρήσεις"] = [r[2] for r in res]
-
-        daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
-        daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
+        daily_summary["Arrival"] = [r[0] for r in res]
+        daily_summary["Departure"] = [r[1] for r in res]
+        daily_summary["Hours_Decimal"] = [r[2] for r in res]
+        daily_summary["Overtime_Decimal"] = [r[3] for r in res]
+        daily_summary["Παρατηρήσεις"] = [r[4] for r in res]
 
         def format_hours_minutes(decimal_hours):
             if pd.isna(decimal_hours) or decimal_hours <= 0:
@@ -121,6 +129,8 @@ if uploaded_file is not None:
 
         daily_summary_clean = daily_summary.drop(
             columns=[
+                "First_Hit",
+                "Last_Hit",
                 "Hours_Decimal",
                 "Overtime_Decimal",
                 "Is_Weekend",
