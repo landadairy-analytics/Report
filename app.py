@@ -34,6 +34,7 @@ if uploaded_file is not None:
     # Καθαρισμός κενών από τη στήλη 'Name'
     df["Name"] = df["Name"].astype(str).str.strip()
 
+
     # ΔΙΟΡΘΩΣΗ ΓΙΑ ΝΥΧΤΕΡΙΝΕΣ ΒΑΡΔΙΕΣ ΜΕΤΑ ΤΙΣ 12:00 ΕΩΣ 02:00
     def adjust_night_shift_date(row):
       dt = row["DateTime"]
@@ -44,10 +45,10 @@ if uploaded_file is not None:
       else:
         return dt.date()
 
+
     df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
-    # 5. Έλεγχος χτυπημάτων ανά ημέρα (πόσα χτυπήματα έχει ο καθένας την ημέρα)
-    # Αν έχει ακριβώς 1 χτύπημα, σημαίνει ότι ξέχασε την άφιξη ή την αποχώρηση.
+    # 5. Έλεγχος χτυπημάτων ανά ημέρα
     counts = df.groupby(["Name", "Date"]).size().reset_index(name="Hit_Count")
 
     # Υπολογισμός Ελάχιστης και Μέγιστης ώρας
@@ -57,7 +58,7 @@ if uploaded_file is not None:
         .reset_index()
     )
 
-    # Ενσωμάτωση του πλήθους χτυπημάτων
+    # Ενσωμάτωση πλήθους χτυπημάτων
     daily_summary = pd.merge(daily_summary, counts, on=["Name", "Date"])
 
     # Προσθήκη στήλης με την ημέρα της εβδομάδας (στα Ελληνικά)
@@ -79,14 +80,12 @@ if uploaded_file is not None:
         pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
     ).astype(int)
 
+
     # 6. Υπολογισμός ωρών εργασίας & διαχείρισης "ξεχασμένου χτυπήματος"
     def calculate_hours_and_notes(row):
-      # Αν έχει μόνο 1 χτύπημα (άρα ξέχασε είτε άφιξη είτε αποχώρηση)
       if row["Hit_Count"] == 1:
-        # Θεωρούμε αυτόματα 10 ώρες (δεν βγάζουμε υπερωρία)
         return 10.0, 0.0, "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν"
       else:
-        # Κανονικός υπολογισμός από min έως max
         hours = (row["Departure"] - row["Arrival"]).total_seconds() / 3600
         if hours < 0:
           hours = 0.0
@@ -94,13 +93,11 @@ if uploaded_file is not None:
         return hours, overtime, ""
 
 
-    # Εφαρμογή της λογικής γραμμή-γραμμή
     res = daily_summary.apply(calculate_hours_and_notes, axis=1)
     daily_summary["Hours_Decimal"] = [r[0] for r in res]
     daily_summary["Overtime_Decimal"] = [r[1] for r in res]
     daily_summary["Παρατηρήσεις"] = [r[2] for r in res]
 
-    # Αν έλειπε το χτύπημα, βάζουμε κενή ένδειξη στις ώρες άφιξης/αποχώρησης για να μην φαίνονται λάθος
     daily_summary.loc[daily_summary["Hit_Count"] == 1, "Arrival"] = pd.NaT
     daily_summary.loc[daily_summary["Hit_Count"] == 1, "Departure"] = pd.NaT
 
@@ -159,64 +156,4 @@ if uploaded_file is not None:
     # ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
     monthly_summary_clean = monthly_summary_clean.rename(
         columns={
-            "Name": "Όνομα Εργαζομένου",
-            "Total_Hours": "Συνολικές Ώρες",
-            "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
-            "Weekend_Count": "Ημέρες Σ-Κ",
-        }
-    )
-
-    daily_summary_clean = daily_summary_clean.rename(
-        columns={
-            "Name": "Όνομα Εργαζομένου",
-            "Date": "Ημερομηνία",
-            "Day_Name": "Ημέρα",
-            "Arrival": "Ώρα Άφιξης",
-            "Departure": "Ώρα Aποχώρησης",
-            "Hours_Worked": "Ώρες Εργασίας",
-            "Overtime": "Ώρες Υπερωρίας",
-        }
-    )
-
-    # 9. Δημιουργία του HTML περιεχομένου
-    html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <title>Αναφορά Ωρών Εργασίας & Υπερωριών</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 30px; background-color: #f9f9f9; color: #333; }}
-            h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #34495e; padding-bottom: 8px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-bottom: 40px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-            th, td {{ padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }}
-            th {{ background-color: #2c3e50; color: white; }}
-            tr:hover {{ background-color: #f1f1f1; }}
-        </style>
-        </head>
-        <body>
-            <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
-            
-            <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
-            {monthly_summary_clean.to_html(index=False, classes='table')}
-            
-            <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
-            {daily_summary_clean.to_html(index=False, classes='table')}
-        </body>
-        </html>
-        """
-
-    st.success(
-        "Το αρχείο επεξεργάστηκε επιτυχώς και το HTML report είναι έτοιμο!"
-    )
-
-    # Εμφάνιση προεπισκόπησης στην οθόνη
-    st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
-    st.dataframe(monthly_summary_clean, use_container_width=True)
-
-    st.subheader("📅 Αναλυτική Ημερήσια Καταγραφή")
-    st.dataframe(daily_summary_clean, use_container_width=True)
-
-    # 10. Κουμπί λήψης του αρχείου HTML για τον χρήστη
-    st.download_button(
-        label="📥 Λή
+            "Name":
