@@ -37,8 +37,13 @@ if uploaded_file is not None:
 
         df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
+        # -------------------------------------------------------------
+        # ΔΙΟΡΘΩΣΗ: Κρατάμε ΜΟΝΟ τις γραμμές με έγκυρη ημερομηνία και ώρα
+        # -------------------------------------------------------------
+        df_valid = df.dropna(subset=["DateTime", "Date"]).copy()
+
         daily_summary = (
-            df.groupby(["Name", "Date"])["DateTime"]
+            df_valid.groupby(["Name", "Date"])["DateTime"]
             .agg(Arrival="min", Departure="max", Hit_Count="count")
             .reset_index()
         )
