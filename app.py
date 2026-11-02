@@ -127,4 +127,76 @@ if uploaded_file is not None:
         monthly_summary["Total_Hours"] = monthly_summary["Hours_Decimal"].apply(
             format_hours_minutes
         )
-        monthly_
+        monthly_summary["Total_Overtime"] = monthly_summary[
+            "Overtime_Decimal"
+        ].apply(format_hours_minutes)
+
+        # Αφαίρεση βοηθητικών στηλών
+        daily_summary_clean = daily_summary.drop(
+            columns=[
+                "Hours_Decimal",
+                "Overtime_Decimal",
+                "Is_Weekend",
+                "Hit_Count",
+            ]
+        )
+        monthly_summary_clean = monthly_summary.drop(
+            columns=["Hours_Decimal", "Overtime_Decimal"]
+        )
+
+        # 7. ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
+        monthly_summary_clean = monthly_summary_clean.rename(
+            columns={
+                "Name": "Όνομα Εργαζομένου",
+                "Total_Hours": "Συνολικές Ώρες",
+                "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
+                "Weekend_Count": "Ημέρες Σ-Κ",
+            }
+        )
+
+        daily_summary_clean = daily_summary_clean.rename(
+            columns={
+                "Name": "Όνομα Εργαζομένου",
+                "Date": "Ημερομηνία",
+                "Day_Name": "Ημέρα",
+                "Arrival": "Ώρα Άφιξης",
+                "Departure": "Ώρα Aποχώρησης",
+                "Hours_Worked": "Ώρες Εργασίας",
+                "Overtime": "Ώρες Υπερωρίας",
+            }
+        )
+
+        # 8. Δημιουργία του HTML περιεχομένου
+        html_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>Αναφορά Ωρών Εργασίας & Υπερωριών</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 30px; background-color: #f9f9f9; color: #333; }
+            h1, h2 { color: #2c3e50; border-bottom: 2px solid #34495e; padding-bottom: 8px; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 40px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background-color: #2c3e50; color: white; }
+            tr:hover { background-color: #f1f1f1; }
+        </style>
+        </head>
+        <body>
+            <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
+            
+            <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
+            __MONTHLY_TABLE__
+            
+            <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
+            __DAILY_TABLE__
+        </body>
+        </html>
+        """
+
+        html_content = html_template.replace(
+            "__MONTHLY_TABLE__",
+            monthly_summary_clean.to_html(index=False, classes="table"),
+        )
+        html_content = html_content.replace(
+            "
