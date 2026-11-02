@@ -31,11 +31,26 @@ if uploaded_file is not None:
         errors="coerce",
     )
 
-    # 4. Δημιουργία στήλης μόνο με την ημερομηνία
-    df["Date"] = df["DateTime"].dt.date
-
     # Καθαρισμός κενών από τη στήλη 'Name'
     df["Name"] = df["Name"].astype(str).str.strip()
+
+
+    # -------------------------------------------------------------
+    # ΔΙΟΡΘΩΣΗ ΓΙΑ ΝΥΧΤΕΡΙΝΕΣ ΒΑΡΔΙΕΣ ΜΕΤΑ ΤΙΣ 12:00 ΕΩΣ 02:00
+    # -------------------------------------------------------------
+    def adjust_night_shift_date(row):
+      dt = row["DateTime"]
+      if pd.isna(dt):
+        return pd.NaT
+      # Αν η ώρα είναι 00:00 έως 02:00 το πρωί
+      if dt.hour < 2:
+        return (dt - pd.Timedelta(days=1)).date()
+      else:
+        return dt.date()
+
+
+    # Δημιουργία στήλης 'Date' με τη διορθωμένη λογική
+    df["Date"] = df.apply(adjust_night_shift_date, axis=1)
 
     # 5. Υπολογισμός Ελάχιστης (Άφιξη) και Μέγιστης (Αποχώρηση) ώρας ανά ημέρα
     daily_summary = (
@@ -73,6 +88,7 @@ if uploaded_file is not None:
         lambda x: max(0, x - 10)
     )
 
+
     # Βοηθητική συνάρτηση μετατροπής σε "X ώρες Y λεπτά"
     def format_hours_minutes(decimal_hours):
       if pd.isna(decimal_hours) or decimal_hours <= 0:
@@ -83,6 +99,7 @@ if uploaded_file is not None:
         hours += 1
         minutes = 0
       return f"{hours} ώρες {minutes} λεπτά"
+
 
     # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο με ενιαία στήλη για Σ-Κ
     monthly_summary = (
@@ -118,9 +135,7 @@ if uploaded_file is not None:
         columns=["Hours_Decimal", "Overtime_Decimal"]
     )
 
-    # -------------------------------------------------------------
     # ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
-    # -------------------------------------------------------------
     monthly_summary_clean = monthly_summary_clean.rename(
         columns={
             "Name": "Όνομα Εργαζομένου",
