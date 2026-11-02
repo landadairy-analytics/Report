@@ -18,7 +18,7 @@ uploaded_file = st.file_uploader("Επιλέξτε αρχείο CSV", type=["csv
 
 if uploaded_file is not None:
   try:
-    # 2. Ανάγνωση του CSV (με τις ρυθμίσεις που δούλεψαν για εσένα)
+    # 2. Ανάγνωση του CSV
     df = pd.read_csv(uploaded_file, sep="\t", encoding="utf-16", engine="python")
 
     # Καθαρισμός κενών από τα ονόματα των στηλών
@@ -44,6 +44,28 @@ if uploaded_file is not None:
         .reset_index()
     )
 
+    # Προσθήκη στήλης με την ημέρα της εβδομάδας (στα Ελληνικά)
+    days_map = {
+        0: "Δευτέρα",
+        1: "Τρίτη",
+        2: "Τετάρτη",
+        3: "Πέμπτη",
+        4: "Παρασκευή",
+        5: "Σάββατο",
+        6: "Κυριακή",
+    }
+    daily_summary["Day_Name"] = (
+        pd.to_datetime(daily_summary["Date"]).dt.dayofweek.map(days_map)
+    )
+
+    # Ειδικές στήλες-δείκτες για Σάββατο και Κυριακή (1 αν είναι, 0 αλλιώς)
+    daily_summary["Is_Saturday"] = (
+        pd.to_datetime(daily_summary["Date"]).dt.dayofweek == 5
+    ).astype(int)
+    daily_summary["Is_Sunday"] = (
+        pd.to_datetime(daily_summary["Date"]).dt.dayofweek == 6
+    ).astype(int)
+
     # 6. Υπολογισμός ωρών εργασίας (σε δεκαδική μορφή)
     daily_summary["Hours_Decimal"] = (
         daily_summary["Departure"] - daily_summary["Arrival"]
@@ -65,14 +87,19 @@ if uploaded_file is not None:
         minutes = 0
       return f"{hours} ώρες {minutes} λεπτά"
 
-    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο
+    # 8. Δημιουργία αθροιστικού πίνακα ανά άτομο (συμπεριλαμβανομένων Σαββάτων & Κυριακών)
     monthly_summary = (
-        daily_summary.groupby("Name")[["Hours_Decimal", "Overtime_Decimal"]]
-        .sum()
+        daily_summary.groupby("Name")
+        .agg(
+            Hours_Decimal=("Hours_Decimal", "sum"),
+            Overtime_Decimal=("Overtime_Decimal", "sum"),
+            Saturday_Count=("Is_Saturday", "sum"),
+            Sunday_Count=("Is_Sunday", "sum"),
+        )
         .reset_index()
     )
 
-    # Εφαρμογή της μορφοποίησης
+    # Εφαρμογή της μορφοποίησης ωρών
     daily_summary["Hours_Worked"] = daily_summary["Hours_Decimal"].apply(
         format_hours_minutes
     )
@@ -87,12 +114,42 @@ if uploaded_file is not None:
         "Overtime_Decimal"
     ].apply(format_hours_minutes)
 
-    # Αφαίρεση βοηθητικών στηλών
+    # Αφαίρεση βοηθητικών στηλών και μετονομασία
     daily_summary_clean = daily_summary.drop(
-        columns=["Hours_Decimal", "Overtime_Decimal"]
+        columns=[
+            "Hours_Decimal",
+            "Overtime_Decimal",
+            "Is_Saturday",
+            "Is_Sunday",
+        ]
     )
     monthly_summary_clean = monthly_summary.drop(
         columns=["Hours_Decimal", "Overtime_Decimal"]
+    )
+
+    # -------------------------------------------------------------
+    # ΜΕΤΟΝΟΜΑΣΙΑ ΣΤΗΛΩΝ ΣΕ ΕΛΛΗΝΙΚΑ
+    # -------------------------------------------------------------
+    monthly_summary_clean = monthly_summary_clean.rename(
+        columns={
+            "Name": "Όνομα Εργαζομένου",
+            "Total_Hours": "Συνολικές Ώρες",
+            "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
+            "Saturday_Count": "Ημέρες Σάββατο",
+            "Sunday_Count": "Ημέρες Κυριακή",
+        }
+    )
+
+    daily_summary_clean = daily_summary_clean.rename(
+        columns={
+            "Name": "Όνομα Εργαζομένου",
+            "Date": "Ημερομηνία",
+            "Day_Name": "Ημέρα",
+            "Arrival": "Ώρα Άφιξης",
+            "Departure": "Ώρα Aποχώρησης",
+            "Hours_Worked": "Ώρες Εργασίας",
+            "Overtime": "Ώρες Υπερωρίας",
+        }
     )
 
     # 9. Δημιουργία του HTML περιεχομένου
