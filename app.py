@@ -1,4 +1,6 @@
 import io
+from datetime import datetime, timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -20,6 +22,7 @@ uploaded_file = st.file_uploader("Επιλέξτε αρχείο CSV", type=["csv
 
 if uploaded_file is not None:
     try:
+        uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file, sep="\t", encoding="utf-16", engine="python")
         df.columns = df.columns.str.strip()
 
@@ -83,6 +86,7 @@ if uploaded_file is not None:
             daily_summary["Gap_Min"] < MIN_GAP_MINUTES
         )
         daily_summary["Has_Issue"] = (too_many | too_close).astype(int)
+        daily_summary["Is_Single"] = (daily_summary["Hit_Count"] == 1).astype(int)
         daily_summary["Issue_Reason"] = ""
         daily_summary.loc[too_many, "Issue_Reason"] = "Πάνω από 2 εγγραφές"
         daily_summary.loc[too_close, "Issue_Reason"] = (
@@ -136,6 +140,129 @@ if uploaded_file is not None:
         daily_summary["Hours_Decimal"] = [r[2] for r in res]
         daily_summary["Overtime_Decimal"] = [r[3] for r in res]
         daily_summary["Παρατηρήσεις"] = [r[4] for r in res]
+        daily_summary["Is_Manual"] = 0
+
+        def make_review(ds):
+            """Πίνακας με τις ημέρες που χρειάζονται έλεγχο (Has_Issue ή Is_Single)."""
+            r = ds[(ds["Has_Issue"] == 1) | (ds["Is_Single"] == 1)].copy()
+            r["Τι έγινε"] = [
+                (
+                    "Δεν υπολογίστηκε: " + x["Issue_Reason"]
+                    if x["Has_Issue"] == 1
+                    else "Υπολογίστηκαν 10 ώρες (εκτίμηση, 1 μόνο χτύπημα)"
+                )
+                for _, x in r.iterrows()
+            ]
+            r = r.sort_values(["Name", "Date"])[
+                ["Name", "Date", "Day_Name", "All_Times", "Τι έγινε"]
+            ].rename(
+                columns={
+                    "Name": "Όνομα Εργαζομένου",
+                    "Date": "Ημερομηνία",
+                    "Day_Name": "Ημέρα",
+                    "All_Times": "Ώρες Εγγραφών",
+                }
+            )
+            r["Ημερομηνία"] = r["Ημερομηνία"].astype(str)
+            return r
+
+        def parse_time_text(text):
+            """Επιστρέφει (ώρα, None) αν είναι σωστό ΩΩ:ΛΛ, αλλιώς (None, μήνυμα)."""
+            t = str(text).strip().replace(".", ":")
+            try:
+                return datetime.strptime(t, "%H:%M"), None
+            except ValueError:
+                return None, "μη έγκυρη ώρα «" + str(text) + "» (γράψε π.χ. 08:30)"
+
+        # ---- Χειροκίνητη καταχώρηση πραγματικών ωρών για τις ημέρες με παρατηρήσεις
+        review_input = make_review(daily_summary)
+        manual_messages = []
+        manual_count = 0
+
+        if len(review_input) > 0:
+            st.subheader("✍️ Ημέρες με παρατηρήσεις - συμπλήρωσε τις πραγματικές ώρες")
+            st.caption(
+                "Γράψε Ώρα Άφιξης ΚΑΙ Ώρα Αποχώρησης (μορφή ΩΩ:ΛΛ) στις ημέρες που"
+                " θέλεις να διορθώσεις. Όσες αφήσεις κενές μένουν όπως υπολογίστηκαν."
+                " Αν η αποχώρηση είναι μετά τα μεσάνυχτα (π.χ. 00:30), μετράει στην"
+                " ίδια ημέρα εργασίας."
+            )
+            review_input["Πραγματική Άφιξη"] = ""
+            review_input["Πραγματική Αποχώρηση"] = ""
+            editor_key = (
+                "review_editor_"
+                + str(getattr(uploaded_file, "name", ""))
+                + "_"
+                + str(getattr(uploaded_file, "size", 0))
+            )
+            edited = st.data_editor(
+                review_input,
+                key=editor_key,
+                hide_index=True,
+                use_container_width=True,
+                disabled=[
+                    "Όνομα Εργαζομένου",
+                    "Ημερομηνία",
+                    "Ημέρα",
+                    "Ώρες Εγγραφών",
+                    "Τι έγινε",
+                ],
+                column_config={
+                    "Πραγματική Άφιξη": st.column_config.TextColumn(
+                        "Πραγματική Άφιξη (ΩΩ:ΛΛ)", max_chars=5
+                    ),
+                    "Πραγματική Αποχώρηση": st.column_config.TextColumn(
+                        "Πραγματική Αποχώρηση (ΩΩ:ΛΛ)", max_chars=5
+                    ),
+                },
+            )
+
+            for idx, erow in edited.iterrows():
+                arr_txt = str(erow["Πραγματική Άφιξη"] or "").strip()
+                dep_txt = str(erow["Πραγματική Αποχώρηση"] or "").strip()
+                if arr_txt in ("", "None") and dep_txt in ("", "None"):
+                    continue
+                who = str(erow["Όνομα Εργαζομένου"]) + " " + str(erow["Ημερομηνία"])
+                if arr_txt in ("", "None") or dep_txt in ("", "None"):
+                    manual_messages.append(who + ": συμπλήρωσε και τις δύο ώρες.")
+                    continue
+                arr_t, err1 = parse_time_text(arr_txt)
+                dep_t, err2 = parse_time_text(dep_txt)
+                if err1 or err2:
+                    manual_messages.append(who + ": " + (err1 or err2))
+                    continue
+                base_date = daily_summary.at[idx, "Date"]
+                arr_dt = datetime.combine(base_date, arr_t.time())
+                dep_dt = datetime.combine(base_date, dep_t.time())
+                if dep_dt <= arr_dt:
+                    if dep_t.hour < 2:
+                        dep_dt = dep_dt + timedelta(days=1)  # μετά τα μεσάνυχτα
+                    else:
+                        manual_messages.append(
+                            who + ": η αποχώρηση είναι πριν ή ίδια με την άφιξη."
+                        )
+                        continue
+                hours = (dep_dt - arr_dt).total_seconds() / 3600
+                daily_summary.at[idx, "Arrival"] = pd.Timestamp(arr_dt)
+                daily_summary.at[idx, "Departure"] = pd.Timestamp(dep_dt)
+                daily_summary.at[idx, "Hours_Decimal"] = hours
+                daily_summary.at[idx, "Overtime_Decimal"] = max(0.0, hours - 10)
+                daily_summary.at[idx, "Παρατηρήσεις"] = (
+                    "Χειροκίνητη καταχώρηση ωρών (αρχικές εγγραφές: "
+                    + daily_summary.at[idx, "All_Times"] + ")"
+                )
+                daily_summary.at[idx, "Has_Issue"] = 0
+                daily_summary.at[idx, "Is_Single"] = 0
+                daily_summary.at[idx, "Is_Manual"] = 1
+                manual_count += 1
+
+            if manual_count > 0:
+                st.success(
+                    "✅ Καταχωρήθηκαν " + str(manual_count)
+                    + " χειροκίνητες διορθώσεις. Τα σύνολα παρακάτω τις περιλαμβάνουν."
+                )
+            for m in manual_messages:
+                st.warning("⚠️ " + m + " (αγνοήθηκε)")
 
         def format_hours_minutes(decimal_hours):
             if pd.isna(decimal_hours) or decimal_hours <= 0:
@@ -154,6 +281,8 @@ if uploaded_file is not None:
                 Overtime_Decimal=("Overtime_Decimal", "sum"),
                 Weekend_Count=("Is_Weekend", "sum"),
                 Issue_Days=("Has_Issue", "sum"),
+                Single_Days=("Is_Single", "sum"),
+                Manual_Days=("Is_Manual", "sum"),
             )
             .reset_index()
         )
@@ -173,9 +302,29 @@ if uploaded_file is not None:
         ].apply(format_hours_minutes)
 
         # Ημέρες με πρόβλημα, κρατάμε πριν σβήσουμε τις βοηθητικές στήλες
-        issues = daily_summary[daily_summary["Has_Issue"] == 1][
-            ["Name", "Date", "Hit_Count", "All_Times", "Issue_Reason"]
-        ]
+        n_issues = int(daily_summary["Has_Issue"].sum())
+        n_single = int(daily_summary["Is_Single"].sum())
+
+        # Ημέρες που ΑΚΟΜΑ χρειάζονται έλεγχο (μετά τις χειροκίνητες διορθώσεις)
+        review = make_review(daily_summary)
+
+        # Χειροκίνητες διορθώσεις, για διαφάνεια στο report
+        manual_rows = daily_summary[daily_summary["Is_Manual"] == 1].sort_values(
+            ["Name", "Date"]
+        )
+        manual_table = pd.DataFrame(
+            {
+                "Όνομα Εργαζομένου": list(manual_rows["Name"]),
+                "Ημερομηνία": [str(d) for d in manual_rows["Date"]],
+                "Ημέρα": list(manual_rows["Day_Name"]),
+                "Αρχικές Εγγραφές": list(manual_rows["All_Times"]),
+                "Άφιξη (χειροκίνητη)": [t.strftime("%H:%M") for t in manual_rows["Arrival"]],
+                "Αποχώρηση (χειροκίνητη)": [
+                    t.strftime("%H:%M") for t in manual_rows["Departure"]
+                ],
+                "Ώρες Εργασίας": list(manual_rows["Hours_Worked"]),
+            }
+        )
 
         daily_summary_clean = daily_summary.drop(
             columns=[
@@ -187,6 +336,8 @@ if uploaded_file is not None:
                 "Hit_Count",
                 "All_Times",
                 "Has_Issue",
+                "Is_Single",
+                "Is_Manual",
                 "Gap_Min",
                 "Issue_Reason",
             ]
@@ -202,6 +353,8 @@ if uploaded_file is not None:
                 "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
                 "Weekend_Count": "Ημέρες Σ-Κ",
                 "Issue_Days": "Ημέρες με Πρόβλημα",
+                "Single_Days": "Ημέρες με 1 Χτύπημα (μέτρησαν 10 ώρες)",
+                "Manual_Days": "Ημέρες με Χειροκίνητη Διόρθωση",
             }
         )
 
@@ -229,59 +382,99 @@ if uploaded_file is not None:
     th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
     th { background-color: #2c3e50; color: white; }
     tr:hover { background-color: #f1f1f1; }
-    .warning { background: #fdecea; border-left: 5px solid #c0392b; padding: 10px 15px; margin-bottom: 20px; }
+    .warning { background: #fdecea; border-left: 5px solid #c0392b; padding: 10px 15px; margin-bottom: 12px; }
+    .info { background: #fff8e1; border-left: 5px solid #f39c12; padding: 10px 15px; margin-bottom: 12px; }
+    .manual { background: #e8f4fd; border-left: 5px solid #2980b9; padding: 10px 15px; margin-bottom: 12px; }
+    .ok { background: #eafaf1; border-left: 5px solid #27ae60; padding: 10px 15px; margin-bottom: 20px; }
 </style>
 </head>
 <body>
     <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
-    __WARNING__
+    __REVIEW__
+    __MANUAL__
     <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
     __MONTHLY_TABLE__
     <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
+    <p>Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση 10 ωρών (1 μόνο χτύπημα). Μπλε = ώρες που καταχωρήθηκαν χειροκίνητα.</p>
     __DAILY_TABLE__
 </body>
 </html>"""
 
-        if len(issues) > 0:
-            warning_html = (
-                '<div class="warning"><b>Προσοχή:</b> ' + str(len(issues))
-                + " ημέρες έχουν ύποπτες εγγραφές (πάνω από 2 εγγραφές ή 2 εγγραφές"
-                " πολύ κοντά μεταξύ τους) και δεν υπολογίστηκαν."
-                " Δείτε τις παρατηρήσεις στην ημερήσια καταγραφή.</div>"
+        issue_msg = (
+            str(n_issues) + " ημέρες ΔΕΝ υπολογίστηκαν (πάνω από 2 εγγραφές ή 2 εγγραφές"
+            " πολύ κοντά μεταξύ τους) και δεν μπήκαν στα σύνολα."
+        )
+        single_msg = (
+            str(n_single) + " ημέρες έχουν 1 μόνο χτύπημα και υπολογίστηκαν ως 10 ώρες"
+            " (εκτίμηση)."
+        )
+
+        # Περίληψη όλων όσων χρειάζονται έλεγχο, στην κορυφή του report
+        if len(review) > 0:
+            review_html = ""
+            if n_issues > 0:
+                review_html += '<div class="warning"><b>Προσοχή:</b> ' + issue_msg + "</div>"
+            if n_single > 0:
+                review_html += '<div class="info"><b>Σημείωση:</b> ' + single_msg + "</div>"
+            review_html += (
+                "<h2>Ημέρες που χρειάζονται έλεγχο</h2>"
+                + review.to_html(index=False, classes="table")
             )
         else:
-            warning_html = ""
+            review_html = '<div class="ok">Δεν βρέθηκαν ημέρες που χρειάζονται έλεγχο.</div>'
 
-        html_content = html_template.replace("__WARNING__", warning_html)
+        # Χρωματισμός γραμμών στην ημερήσια καταγραφή
+        def highlight_row(row):
+            note = str(row["Παρατηρήσεις"])
+            if note.startswith("ΠΡΟΣΟΧΗ"):
+                color = "background-color: #fdecea"
+            elif note.startswith("Χειροκίνητη"):
+                color = "background-color: #e8f4fd"
+            elif note != "":
+                color = "background-color: #fff8e1"
+            else:
+                color = ""
+            return [color] * len(row)
+
+        daily_html = (
+            daily_summary_clean.style.apply(highlight_row, axis=1)
+            .format(na_rep="")
+            .hide(axis="index")
+            .set_table_attributes('class="table"')
+            .to_html()
+        )
+
+        if len(manual_table) > 0:
+            manual_html = (
+                '<div class="manual"><b>Σημείωση:</b> ' + str(len(manual_table))
+                + " ημέρες έχουν ώρες που καταχωρήθηκαν χειροκίνητα και δεν"
+                " προέρχονται από την κάρτα.</div>"
+                "<h2>Χειροκίνητες διορθώσεις</h2>"
+                + manual_table.to_html(index=False, classes="table")
+            )
+        else:
+            manual_html = ""
+
+        html_content = html_template.replace("__REVIEW__", review_html)
+        html_content = html_content.replace("__MANUAL__", manual_html)
         html_content = html_content.replace(
             "__MONTHLY_TABLE__",
             monthly_summary_clean.to_html(index=False, classes="table"),
         )
-        html_content = html_content.replace(
-            "__DAILY_TABLE__",
-            daily_summary_clean.to_html(index=False, classes="table"),
-        )
+        html_content = html_content.replace("__DAILY_TABLE__", daily_html)
 
         st.success("Το αρχείο επεξεργάστηκε επιτυχώς!")
 
-        if len(issues) > 0:
-            st.warning(
-                "⚠️ Βρέθηκαν " + str(len(issues)) + " ημέρες με ύποπτες εγγραφές "
-                "(πάνω από 2 εγγραφές ή 2 εγγραφές πολύ κοντά μεταξύ τους). "
-                "Δεν υπολογίστηκαν ώρες για αυτές και δεν μπήκαν στα σύνολα."
-            )
-            st.dataframe(
-                issues.rename(
-                    columns={
-                        "Name": "Όνομα Εργαζομένου",
-                        "Date": "Ημερομηνία",
-                        "Hit_Count": "Αριθμός Εγγραφών",
-                        "All_Times": "Ώρες Εγγραφών",
-                        "Issue_Reason": "Λόγος",
-                    }
-                ),
-                use_container_width=True,
-            )
+        # Περίληψη όλων όσων χρειάζονται έλεγχο, στην κορυφή της οθόνης
+        if len(review) > 0:
+            if n_issues > 0:
+                st.warning("⚠️ " + issue_msg)
+            if n_single > 0:
+                st.info("ℹ️ " + single_msg)
+            st.subheader("🔎 Ημέρες που χρειάζονται έλεγχο")
+            st.dataframe(review, use_container_width=True)
+        else:
+            st.success("Δεν βρέθηκαν ημέρες που χρειάζονται έλεγχο.")
 
         st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
         st.dataframe(monthly_summary_clean, use_container_width=True)
