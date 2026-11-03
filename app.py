@@ -2,6 +2,10 @@ import io
 import pandas as pd
 import streamlit as st
 
+# Αν 2 εγγραφές της ίδιας μέρας απέχουν λιγότερο από αυτό (σε λεπτά),
+# θεωρούνται ύποπτες (π.χ. διπλό χτύπημα) και δεν υπολογίζονται.
+MIN_GAP_MINUTES = 30
+
 st.set_page_config(
     page_title="Αναφορά Ωρών Εργασίας & Υπερωριών", page_icon="⏱️", layout="wide"
 )
@@ -39,11 +43,17 @@ if uploaded_file is not None:
 
         df_valid = df.dropna(subset=["DateTime", "Date"]).copy()
 
-        # Αντί για min/max γενικά, θα βρούμε πόσα χτυπήματα υπάρχουν
-        # και ποια είναι η πρώτη/τελευταία ώρα ανά μέρα
+        def list_times(series):
+            return ", ".join(t.strftime("%H:%M") for t in sorted(series))
+
         daily_summary = (
             df_valid.groupby(["Name", "Date"])["DateTime"]
-            .agg(First_Hit="min", Last_Hit="max", Hit_Count="count")
+            .agg(
+                First_Hit="min",
+                Last_Hit="max",
+                Hit_Count="count",
+                All_Times=list_times,
+            )
             .reset_index()
         )
 
@@ -62,6 +72,24 @@ if uploaded_file is not None:
         daily_summary["Is_Weekend"] = (
             pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
         ).astype(int)
+        # Διαφορά πρώτης-τελευταίας εγγραφής σε λεπτά
+        daily_summary["Gap_Min"] = (
+            daily_summary["Last_Hit"] - daily_summary["First_Hit"]
+        ).dt.total_seconds() / 60
+
+        # Πρόβλημα που θέλει έλεγχο: 3+ εγγραφές, ή 2 εγγραφές πολύ κοντινές
+        too_many = daily_summary["Hit_Count"] > 2
+        too_close = (daily_summary["Hit_Count"] == 2) & (
+            daily_summary["Gap_Min"] < MIN_GAP_MINUTES
+        )
+        daily_summary["Has_Issue"] = (too_many | too_close).astype(int)
+        daily_summary["Issue_Reason"] = ""
+        daily_summary.loc[too_many, "Issue_Reason"] = "Πάνω από 2 εγγραφές"
+        daily_summary.loc[too_close, "Issue_Reason"] = (
+            "2 εγγραφές με πολύ μικρή διαφορά ("
+            + daily_summary.loc[too_close, "Gap_Min"].map(lambda g: str(round(g, 1)))
+            + " λεπτά)"
+        )
 
         def calculate_hours_and_notes(row):
             hits = row["Hit_Count"]
@@ -74,17 +102,33 @@ if uploaded_file is not None:
                     0.0,
                     "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν",
                 )
-            elif hits >= 2:
-                # Κανονικά χτυπήματα (Άφιξη = First, Αποχώρηση = Last)
+            elif hits == 2 and row["Gap_Min"] < MIN_GAP_MINUTES:
+                # 2 εγγραφές σχεδόν ταυτόχρονα: ΔΕΝ μαντεύουμε
+                return (
+                    pd.NaT,
+                    pd.NaT,
+                    0.0,
+                    0.0,
+                    "ΠΡΟΣΟΧΗ: 2 εγγραφές με διαφορά μόνο " + str(round(row["Gap_Min"], 1))
+                    + " λεπτών (" + row["All_Times"]
+                    + ") - Δεν υπολογίστηκε, απαιτείται έλεγχος",
+                )
+            elif hits == 2:
                 arr = row["First_Hit"]
                 dep = row["Last_Hit"]
                 hours = (dep - arr).total_seconds() / 3600
-                if hours < 0:
-                    hours = 0.0
                 overtime = max(0, hours - 10)
                 return arr, dep, hours, overtime, ""
             else:
-                return pd.NaT, pd.NaT, 0.0, 0.0, ""
+                # 3+ εγγραφές: ΔΕΝ μαντεύουμε. Καμία ώρα, καμία υπολογισμένη τιμή.
+                return (
+                    pd.NaT,
+                    pd.NaT,
+                    0.0,
+                    0.0,
+                    "ΠΡΟΣΟΧΗ: " + str(hits) + " εγγραφές (" + row["All_Times"]
+                    + ") - Δεν υπολογίστηκε, απαιτείται έλεγχος",
+                )
 
         res = daily_summary.apply(calculate_hours_and_notes, axis=1)
         daily_summary["Arrival"] = [r[0] for r in res]
@@ -109,6 +153,7 @@ if uploaded_file is not None:
                 Hours_Decimal=("Hours_Decimal", "sum"),
                 Overtime_Decimal=("Overtime_Decimal", "sum"),
                 Weekend_Count=("Is_Weekend", "sum"),
+                Issue_Days=("Has_Issue", "sum"),
             )
             .reset_index()
         )
@@ -127,6 +172,11 @@ if uploaded_file is not None:
             "Overtime_Decimal"
         ].apply(format_hours_minutes)
 
+        # Ημέρες με πρόβλημα, κρατάμε πριν σβήσουμε τις βοηθητικές στήλες
+        issues = daily_summary[daily_summary["Has_Issue"] == 1][
+            ["Name", "Date", "Hit_Count", "All_Times", "Issue_Reason"]
+        ]
+
         daily_summary_clean = daily_summary.drop(
             columns=[
                 "First_Hit",
@@ -135,6 +185,10 @@ if uploaded_file is not None:
                 "Overtime_Decimal",
                 "Is_Weekend",
                 "Hit_Count",
+                "All_Times",
+                "Has_Issue",
+                "Gap_Min",
+                "Issue_Reason",
             ]
         )
         monthly_summary_clean = monthly_summary.drop(
@@ -147,6 +201,7 @@ if uploaded_file is not None:
                 "Total_Hours": "Συνολικές Ώρες",
                 "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
                 "Weekend_Count": "Ημέρες Σ-Κ",
+                "Issue_Days": "Ημέρες με Πρόβλημα",
             }
         )
 
@@ -156,7 +211,7 @@ if uploaded_file is not None:
                 "Date": "Ημερομηνία",
                 "Day_Name": "Ημέρα",
                 "Arrival": "Ώρα Άφιξης",
-                "Departure": "Ώρα Aποχώρησης",
+                "Departure": "Ώρα Αποχώρησης",
                 "Hours_Worked": "Ώρες Εργασίας",
                 "Overtime": "Ώρες Υπερωρίας",
             }
@@ -174,10 +229,12 @@ if uploaded_file is not None:
     th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
     th { background-color: #2c3e50; color: white; }
     tr:hover { background-color: #f1f1f1; }
+    .warning { background: #fdecea; border-left: 5px solid #c0392b; padding: 10px 15px; margin-bottom: 20px; }
 </style>
 </head>
 <body>
     <h1>Αναφορά Ωρών Εργασίας & Υπερωριών</h1>
+    __WARNING__
     <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
     __MONTHLY_TABLE__
     <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
@@ -185,7 +242,18 @@ if uploaded_file is not None:
 </body>
 </html>"""
 
-        html_content = html_template.replace(
+        if len(issues) > 0:
+            warning_html = (
+                '<div class="warning"><b>Προσοχή:</b> ' + str(len(issues))
+                + " ημέρες έχουν ύποπτες εγγραφές (πάνω από 2 εγγραφές ή 2 εγγραφές"
+                " πολύ κοντά μεταξύ τους) και δεν υπολογίστηκαν."
+                " Δείτε τις παρατηρήσεις στην ημερήσια καταγραφή.</div>"
+            )
+        else:
+            warning_html = ""
+
+        html_content = html_template.replace("__WARNING__", warning_html)
+        html_content = html_content.replace(
             "__MONTHLY_TABLE__",
             monthly_summary_clean.to_html(index=False, classes="table"),
         )
@@ -195,6 +263,25 @@ if uploaded_file is not None:
         )
 
         st.success("Το αρχείο επεξεργάστηκε επιτυχώς!")
+
+        if len(issues) > 0:
+            st.warning(
+                "⚠️ Βρέθηκαν " + str(len(issues)) + " ημέρες με ύποπτες εγγραφές "
+                "(πάνω από 2 εγγραφές ή 2 εγγραφές πολύ κοντά μεταξύ τους). "
+                "Δεν υπολογίστηκαν ώρες για αυτές και δεν μπήκαν στα σύνολα."
+            )
+            st.dataframe(
+                issues.rename(
+                    columns={
+                        "Name": "Όνομα Εργαζομένου",
+                        "Date": "Ημερομηνία",
+                        "Hit_Count": "Αριθμός Εγγραφών",
+                        "All_Times": "Ώρες Εγγραφών",
+                        "Issue_Reason": "Λόγος",
+                    }
+                ),
+                use_container_width=True,
+            )
 
         st.subheader("📋 Μηνιαίο Σύνολο ανά Εργαζόμενο")
         st.dataframe(monthly_summary_clean, use_container_width=True)
