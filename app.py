@@ -371,15 +371,6 @@ if uploaded_file is not None:
         weekday = pd.to_datetime(daily_summary["Date"]).dt.dayofweek
         daily_summary["Day_Name"] = weekday.map(days_map)
         daily_summary["Is_Weekend"] = weekday.isin([5, 6]).astype(int)
-
-        first_date = daily_summary["Date"].min()
-        last_date = daily_summary["Date"].max()
-        if (first_date.year, first_date.month) != (last_date.year, last_date.month):
-            st.warning(
-                "⚠️ Το αρχείο καλύπτει περισσότερους από έναν μήνες ("
-                + first_date.strftime("%d/%m/%Y") + " - " + last_date.strftime("%d/%m/%Y")
-                + "). Τα σύνολα ανά εργαζόμενο αθροίζονται για όλο το διάστημα."
-            )
         # Διαφορά πρώτης-τελευταίας εγγραφής σε λεπτά
         daily_summary["Gap_Min"] = (
             daily_summary["Last_Hit"] - daily_summary["First_Hit"]
@@ -448,6 +439,7 @@ if uploaded_file is not None:
         daily_summary["Overtime_Decimal"] = [r[3] for r in res]
         daily_summary["Παρατηρήσεις"] = [r[4] for r in res]
         daily_summary["Is_Manual"] = 0
+        daily_summary["Is_Ignored"] = 0
 
         def make_review(ds):
             """Πίνακας με τις ημέρες που χρειάζονται έλεγχο (Has_Issue ή Is_Single)."""
@@ -496,10 +488,13 @@ if uploaded_file is not None:
                 "Γράψε Ώρα Άφιξης ΚΑΙ Ώρα Αποχώρησης (μορφή ΩΩ:ΛΛ) στις ημέρες που"
                 " θέλεις να διορθώσεις. Όσες αφήσεις κενές μένουν όπως υπολογίστηκαν."
                 " Αν η αποχώρηση είναι μετά τα μεσάνυχτα (π.χ. 00:30), μετράει στην"
-                " ίδια ημέρα εργασίας."
+                " ίδια ημέρα εργασίας. Αν μια ημέρα δεν πρέπει να μετρήσει καθόλου"
+                " (π.χ. λάθος ημερομηνία), τσέκαρε «Αγνόηση ημέρας» και θα μπει με 0 ώρες"
+                " (οι ώρες που έγραψες στην ίδια γραμμή τότε δεν λαμβάνονται υπόψη)."
             )
             review_input["Πραγματική Άφιξη"] = ""
             review_input["Πραγματική Αποχώρηση"] = ""
+            review_input["Αγνόηση ημέρας (0 ώρες)"] = False
             try:
                 file_id = hashlib.md5(uploaded_file.getvalue()).hexdigest()[:12]
             except Exception:
@@ -540,10 +535,33 @@ if uploaded_file is not None:
                     "Πραγματική Αποχώρηση": st.column_config.TextColumn(
                         "Πραγματική Αποχώρηση (ΩΩ:ΛΛ)", max_chars=5
                     ),
+                    "Αγνόηση ημέρας (0 ώρες)": st.column_config.CheckboxColumn(
+                        "Αγνόηση ημέρας (0 ώρες)",
+                        help="Η ημέρα δεν μετράει καθόλου (0 ώρες, χωρίς υπερωρία).",
+                        default=False,
+                    ),
                 },
             )
 
             for idx, erow in edited.iterrows():
+                ignore_flag = erow.get("Αγνόηση ημέρας (0 ώρες)", False)
+                if (not pd.isna(ignore_flag)) and bool(ignore_flag):
+                    # Η ημέρα δεν μετράει: 0 ώρες, χωρίς ώρες άφιξης/αποχώρησης
+                    daily_summary.at[idx, "Arrival"] = pd.NaT
+                    daily_summary.at[idx, "Departure"] = pd.NaT
+                    daily_summary.at[idx, "Hours_Decimal"] = 0.0
+                    daily_summary.at[idx, "Overtime_Decimal"] = 0.0
+                    daily_summary.at[idx, "Παρατηρήσεις"] = (
+                        "Χειροκίνητη αγνόηση ημέρας - 0 ώρες (αρχικές εγγραφές: "
+                        + daily_summary.at[idx, "All_Times"] + ")"
+                    )
+                    daily_summary.at[idx, "Has_Issue"] = 0
+                    daily_summary.at[idx, "Is_Single"] = 0
+                    daily_summary.at[idx, "Is_Weekend"] = 0
+                    daily_summary.at[idx, "Is_Manual"] = 1
+                    daily_summary.at[idx, "Is_Ignored"] = 1
+                    manual_count += 1
+                    continue
                 arr_txt = cell_text(erow["Πραγματική Άφιξη"])
                 dep_txt = cell_text(erow["Πραγματική Αποχώρηση"])
                 if arr_txt == "" and dep_txt == "":
@@ -589,6 +607,19 @@ if uploaded_file is not None:
                 )
             for m in manual_messages:
                 st.warning("⚠️ " + m + " (αγνοήθηκε)")
+
+        # Περίοδος δεδομένων: οι ημέρες που αγνοήθηκαν δεν μετράνε
+        active_dates = daily_summary.loc[daily_summary["Is_Ignored"] == 0, "Date"]
+        if active_dates.empty:
+            active_dates = daily_summary["Date"]
+        first_date = active_dates.min()
+        last_date = active_dates.max()
+        if (first_date.year, first_date.month) != (last_date.year, last_date.month):
+            st.warning(
+                "⚠️ Το αρχείο καλύπτει περισσότερους από έναν μήνες ("
+                + first_date.strftime("%d/%m/%Y") + " - " + last_date.strftime("%d/%m/%Y")
+                + "). Τα σύνολα ανά εργαζόμενο αθροίζονται για όλο το διάστημα."
+            )
 
         def format_hours_minutes(decimal_hours):
             if pd.isna(decimal_hours) or decimal_hours <= 0:
@@ -639,9 +670,11 @@ if uploaded_file is not None:
                 "Ημερομηνία": [str(d) for d in manual_rows["Date"]],
                 "Ημέρα": list(manual_rows["Day_Name"]),
                 "Αρχικές Εγγραφές": list(manual_rows["All_Times"]),
-                "Άφιξη (χειροκίνητη)": [t.strftime("%H:%M") for t in manual_rows["Arrival"]],
+                "Άφιξη (χειροκίνητη)": [
+                    "—" if pd.isna(t) else t.strftime("%H:%M") for t in manual_rows["Arrival"]
+                ],
                 "Αποχώρηση (χειροκίνητη)": [
-                    t.strftime("%H:%M") for t in manual_rows["Departure"]
+                    "—" if pd.isna(t) else t.strftime("%H:%M") for t in manual_rows["Departure"]
                 ],
                 "Ώρες Εργασίας": list(manual_rows["Hours_Worked"]),
             }
@@ -659,6 +692,7 @@ if uploaded_file is not None:
                 "Has_Issue",
                 "Is_Single",
                 "Is_Manual",
+                "Is_Ignored",
                 "Gap_Min",
                 "Issue_Reason",
             ]
@@ -806,8 +840,8 @@ if uploaded_file is not None:
         try:
             if len(daily_summary) > 0:
                 period = (
-                    "Περίοδος: " + daily_summary["Date"].min().strftime("%d/%m/%Y")
-                    + " - " + daily_summary["Date"].max().strftime("%d/%m/%Y")
+                    "Περίοδος: " + first_date.strftime("%d/%m/%Y")
+                    + " - " + last_date.strftime("%d/%m/%Y")
                     + " | Δημιουργήθηκε: " + datetime.now().strftime("%d/%m/%Y %H:%M")
                 )
             else:
