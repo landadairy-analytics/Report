@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 from datetime import datetime, timedelta
@@ -6,6 +7,16 @@ from xml.sax.saxutils import escape
 import pandas as pd
 import streamlit as st
 
+
+class InputError(Exception):
+    """Πρόβλημα στο αρχείο εισόδου, με μήνυμα κατανοητό για τον χρήστη."""
+
+# ---- Κανόνες υπολογισμού (αλλάζουν μόνο εδώ) ----
+# Κανονικό ωράριο σε ώρες: ό,τι το ξεπερνά μετράει υπερωρία, και τόσες ώρες
+# μπαίνουν (ως εκτίμηση) όταν υπάρχει μόνο 1 χτύπημα στη μέρα.
+STANDARD_HOURS = 10
+# Χτυπήματα πριν από αυτή την ώρα (π.χ. 00:30) ανήκουν στην προηγούμενη ημέρα εργασίας.
+NIGHT_CUTOFF_HOUR = 2
 # Αν 2 εγγραφές της ίδιας μέρας απέχουν λιγότερο από αυτό (σε λεπτά),
 # θεωρούνται ύποπτες (π.χ. διπλό χτύπημα) και δεν υπολογίζονται.
 MIN_GAP_MINUTES = 30
@@ -148,7 +159,7 @@ def build_pdf_report(review, manual_table, monthly, daily, n_issues, n_single, p
                 box(
                     "<b>Σημείωση:</b> " + escape(
                         str(n_single) + " ημέρες έχουν 1 μόνο χτύπημα και υπολογίστηκαν ως"
-                        " 10 ώρες (εκτίμηση)."
+                        " " + str(STANDARD_HOURS) + " ώρες (εκτίμηση)."
                     ),
                     "#fff8e1", "#f39c12",
                 ),
@@ -241,7 +252,7 @@ def build_pdf_report(review, manual_table, monthly, daily, n_issues, n_single, p
         Paragraph("Αναλυτική Ημερήσια Καταγραφή", st_h2),
         Paragraph(
             escape(
-                "Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση 10 ωρών"
+                "Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση " + str(STANDARD_HOURS) + " ωρών"
                 " (1 μόνο χτύπημα). Μπλε = ώρες που καταχωρήθηκαν χειροκίνητα."
                 " (+1) = την επόμενη ημερολογιακή μέρα."
             ),
@@ -287,7 +298,7 @@ st.set_page_config(
 st.title("📊 Σύστημα Υπολογισμού Ωρών & Υπερωριών Εργαζομένων")
 st.write(
     "Ανεβάστε το αρχείο CSV με τα χτυπήματα της κάρτας για να δημιουργηθεί"
-    " αυτόματα το HTML report."
+    " αυτόματα το report (HTML και PDF για εκτύπωση)."
 )
 
 uploaded_file = st.file_uploader("Επιλέξτε αρχείο CSV", type=["csv", "txt"])
@@ -298,25 +309,41 @@ if uploaded_file is not None:
         df = pd.read_csv(uploaded_file, sep="\t", encoding="utf-16", engine="python")
         df.columns = df.columns.str.strip()
 
+        missing_cols = [c for c in ("Name", "DateTime") if c not in df.columns]
+        if missing_cols:
+            raise InputError(
+                "Στο αρχείο λείπουν οι στήλες: " + ", ".join(missing_cols)
+                + ". Στήλες που βρέθηκαν: " + ", ".join(str(c) for c in df.columns)
+            )
+
         df["DateTime"] = pd.to_datetime(
             df["DateTime"].astype(str).str.strip(),
             format="%Y/%m/%d %H:%M:%S",
             errors="coerce",
         )
-        df["Name"] = df["Name"].astype(str).str.strip()
+        df["Name"] = df["Name"].fillna("").astype(str).str.strip()
 
-        def adjust_night_shift_date(row):
-            dt = row["DateTime"]
-            if pd.isna(dt):
-                return pd.NaT
-            if dt.hour < 2:
-                return (dt - pd.Timedelta(days=1)).date()
-            else:
-                return dt.date()
+        # Γραμμές που δεν μπορούν να χρησιμοποιηθούν: ενημερώνουμε, δεν τις χάνουμε σιωπηλά
+        bad_time = df["DateTime"].isna()
+        no_name = df["Name"] == ""
+        if bad_time.sum() > 0:
+            st.warning(
+                "⚠️ Αγνοήθηκαν " + str(int(bad_time.sum()))
+                + " γραμμές με μη αναγνώσιμη ημερομηνία/ώρα."
+            )
+        if (no_name & ~bad_time).sum() > 0:
+            st.warning(
+                "⚠️ Αγνοήθηκαν " + str(int((no_name & ~bad_time).sum()))
+                + " γραμμές χωρίς όνομα εργαζομένου."
+            )
+        df_valid = df[~bad_time & ~no_name].copy()
+        if df_valid.empty:
+            raise InputError("Δεν βρέθηκε καμία έγκυρη εγγραφή στο αρχείο.")
 
-        df["Date"] = df.apply(adjust_night_shift_date, axis=1)
-
-        df_valid = df.dropna(subset=["DateTime", "Date"]).copy()
+        # Ημέρα εργασίας: τα χτυπήματα πριν τις NIGHT_CUTOFF_HOUR ανήκουν στην προηγούμενη
+        df_valid["Date"] = (
+            df_valid["DateTime"] - pd.Timedelta(hours=NIGHT_CUTOFF_HOUR)
+        ).dt.date
 
         def list_times(series):
             return ", ".join(t.strftime("%H:%M") for t in sorted(series))
@@ -341,12 +368,18 @@ if uploaded_file is not None:
             5: "Σάββατο",
             6: "Κυριακή",
         }
-        daily_summary["Day_Name"] = (
-            pd.to_datetime(daily_summary["Date"]).dt.dayofweek.map(days_map)
-        )
-        daily_summary["Is_Weekend"] = (
-            pd.to_datetime(daily_summary["Date"]).dt.dayofweek.isin([5, 6])
-        ).astype(int)
+        weekday = pd.to_datetime(daily_summary["Date"]).dt.dayofweek
+        daily_summary["Day_Name"] = weekday.map(days_map)
+        daily_summary["Is_Weekend"] = weekday.isin([5, 6]).astype(int)
+
+        first_date = daily_summary["Date"].min()
+        last_date = daily_summary["Date"].max()
+        if (first_date.year, first_date.month) != (last_date.year, last_date.month):
+            st.warning(
+                "⚠️ Το αρχείο καλύπτει περισσότερους από έναν μήνες ("
+                + first_date.strftime("%d/%m/%Y") + " - " + last_date.strftime("%d/%m/%Y")
+                + "). Τα σύνολα ανά εργαζόμενο αθροίζονται για όλο το διάστημα."
+            )
         # Διαφορά πρώτης-τελευταίας εγγραφής σε λεπτά
         daily_summary["Gap_Min"] = (
             daily_summary["Last_Hit"] - daily_summary["First_Hit"]
@@ -361,20 +394,20 @@ if uploaded_file is not None:
         daily_summary["Is_Single"] = (daily_summary["Hit_Count"] == 1).astype(int)
         daily_summary["Issue_Reason"] = ""
         daily_summary.loc[too_many, "Issue_Reason"] = "Πάνω από 2 εγγραφές"
-        daily_summary.loc[too_close, "Issue_Reason"] = (
-            "2 εγγραφές με πολύ μικρή διαφορά ("
-            + daily_summary.loc[too_close, "Gap_Min"].map(lambda g: str(round(g, 1)))
-            + " λεπτά)"
-        )
+        if too_close.any():
+            daily_summary.loc[too_close, "Issue_Reason"] = [
+                "2 εγγραφές με πολύ μικρή διαφορά (" + str(round(g, 1)) + " λεπτά)"
+                for g in daily_summary.loc[too_close, "Gap_Min"]
+            ]
 
         def calculate_hours_and_notes(row):
             hits = row["Hit_Count"]
             if hits == 1:
-                # 1 χτύπημα: Υπολογίζουμε 10ωρο και βάζουμε παρατήρηση
+                # 1 χτύπημα: Υπολογίζουμε το κανονικό ωράριο και βάζουμε παρατήρηση
                 return (
                     row["First_Hit"],
                     pd.NaT,
-                    10.0,
+                    float(STANDARD_HOURS),
                     0.0,
                     "Ελλιπές χτύπημα - Ξέχασαν να χτυπήσουν",
                 )
@@ -392,8 +425,10 @@ if uploaded_file is not None:
             elif hits == 2:
                 arr = row["First_Hit"]
                 dep = row["Last_Hit"]
-                hours = (dep - arr).total_seconds() / 3600
-                overtime = max(0, hours - 10)
+                # Στρογγυλοποίηση σε ολόκληρα λεπτά ΑΝΑ ΗΜΕΡΑ, ώστε τα μηνιαία σύνολα
+                # να ισούνται πάντα με το άθροισμα των ημερήσιων γραμμών
+                hours = round((dep - arr).total_seconds() / 60) / 60
+                overtime = max(0.0, hours - STANDARD_HOURS)
                 return arr, dep, hours, overtime, ""
             else:
                 # 3+ εγγραφές: ΔΕΝ μαντεύουμε. Καμία ώρα, καμία υπολογισμένη τιμή.
@@ -421,7 +456,7 @@ if uploaded_file is not None:
                 (
                     "Δεν υπολογίστηκε: " + x["Issue_Reason"]
                     if x["Has_Issue"] == 1
-                    else "Υπολογίστηκαν 10 ώρες (εκτίμηση, 1 μόνο χτύπημα)"
+                    else "Υπολογίστηκαν " + str(STANDARD_HOURS) + " ώρες (εκτίμηση, 1 μόνο χτύπημα)"
                 )
                 for _, x in r.iterrows()
             ]
@@ -437,6 +472,10 @@ if uploaded_file is not None:
             )
             r["Ημερομηνία"] = r["Ημερομηνία"].astype(str)
             return r
+
+        def cell_text(value):
+            """Κείμενο κελιού του editor, κενό αν είναι None/NaN/NA (όταν σβηστεί)."""
+            return "" if pd.isna(value) else str(value).strip()
 
         def parse_time_text(text):
             """Επιστρέφει (ώρα, None) αν είναι σωστό ΩΩ:ΛΛ, αλλιώς (None, μήνυμα)."""
@@ -461,12 +500,14 @@ if uploaded_file is not None:
             )
             review_input["Πραγματική Άφιξη"] = ""
             review_input["Πραγματική Αποχώρηση"] = ""
-            editor_key = (
-                "review_editor_"
-                + str(getattr(uploaded_file, "name", ""))
-                + "_"
-                + str(getattr(uploaded_file, "size", 0))
-            )
+            try:
+                file_id = hashlib.md5(uploaded_file.getvalue()).hexdigest()[:12]
+            except Exception:
+                file_id = str(getattr(uploaded_file, "name", "")) + str(
+                    getattr(uploaded_file, "size", 0)
+                )
+            editor_key = "review_editor_" + file_id
+
             def highlight_unresolved(row):
                 if str(row["Τι έγινε"]).startswith("Δεν υπολογίστηκε"):
                     style = "background-color: #fdecea; color: #7b1f16"
@@ -503,12 +544,12 @@ if uploaded_file is not None:
             )
 
             for idx, erow in edited.iterrows():
-                arr_txt = str(erow["Πραγματική Άφιξη"] or "").strip()
-                dep_txt = str(erow["Πραγματική Αποχώρηση"] or "").strip()
-                if arr_txt in ("", "None") and dep_txt in ("", "None"):
+                arr_txt = cell_text(erow["Πραγματική Άφιξη"])
+                dep_txt = cell_text(erow["Πραγματική Αποχώρηση"])
+                if arr_txt == "" and dep_txt == "":
                     continue
                 who = str(erow["Όνομα Εργαζομένου"]) + " " + str(erow["Ημερομηνία"])
-                if arr_txt in ("", "None") or dep_txt in ("", "None"):
+                if arr_txt == "" or dep_txt == "":
                     manual_messages.append(who + ": συμπλήρωσε και τις δύο ώρες.")
                     continue
                 arr_t, err1 = parse_time_text(arr_txt)
@@ -520,18 +561,18 @@ if uploaded_file is not None:
                 arr_dt = datetime.combine(base_date, arr_t.time())
                 dep_dt = datetime.combine(base_date, dep_t.time())
                 if dep_dt <= arr_dt:
-                    if dep_t.hour < 2:
+                    if dep_t.hour < NIGHT_CUTOFF_HOUR:
                         dep_dt = dep_dt + timedelta(days=1)  # μετά τα μεσάνυχτα
                     else:
                         manual_messages.append(
                             who + ": η αποχώρηση είναι πριν ή ίδια με την άφιξη."
                         )
                         continue
-                hours = (dep_dt - arr_dt).total_seconds() / 3600
+                hours = round((dep_dt - arr_dt).total_seconds() / 60) / 60
                 daily_summary.at[idx, "Arrival"] = pd.Timestamp(arr_dt)
                 daily_summary.at[idx, "Departure"] = pd.Timestamp(dep_dt)
                 daily_summary.at[idx, "Hours_Decimal"] = hours
-                daily_summary.at[idx, "Overtime_Decimal"] = max(0.0, hours - 10)
+                daily_summary.at[idx, "Overtime_Decimal"] = max(0.0, hours - STANDARD_HOURS)
                 daily_summary.at[idx, "Παρατηρήσεις"] = (
                     "Χειροκίνητη καταχώρηση ωρών (αρχικές εγγραφές: "
                     + daily_summary.at[idx, "All_Times"] + ")"
@@ -552,12 +593,10 @@ if uploaded_file is not None:
         def format_hours_minutes(decimal_hours):
             if pd.isna(decimal_hours) or decimal_hours <= 0:
                 return "0 ώρες 0 λεπτά"
-            hours = int(decimal_hours)
-            minutes = int(round((decimal_hours - hours) * 60))
-            if minutes == 60:
-                hours += 1
-                minutes = 0
-            return str(hours) + " ώρες " + str(minutes) + " λεπτά"
+            hours, minutes = divmod(int(round(decimal_hours * 60)), 60)
+            hours_txt = "1 ώρα" if hours == 1 else str(hours) + " ώρες"
+            minutes_txt = "1 λεπτό" if minutes == 1 else str(minutes) + " λεπτά"
+            return hours_txt + " " + minutes_txt
 
         monthly_summary = (
             daily_summary.groupby("Name")
@@ -674,7 +713,7 @@ if uploaded_file is not None:
     <h2>Μηνιαίο Σύνολο Ανά Εργαζόμενο</h2>
     __MONTHLY_TABLE__
     <h2>Αναλυτική Ημερήσια Καταγραφή</h2>
-    <p>Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση 10 ωρών (1 μόνο χτύπημα). Μπλε = ώρες που καταχωρήθηκαν χειροκίνητα.</p>
+    <p>Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση __STD__ ωρών (1 μόνο χτύπημα). Μπλε = ώρες που καταχωρήθηκαν χειροκίνητα.</p>
     __DAILY_TABLE__
 </body>
 </html>"""
@@ -684,7 +723,7 @@ if uploaded_file is not None:
             " πολύ κοντά μεταξύ τους) και δεν μπήκαν στα σύνολα."
         )
         single_msg = (
-            str(n_single) + " ημέρες έχουν 1 μόνο χτύπημα και υπολογίστηκαν ως 10 ώρες"
+            str(n_single) + " ημέρες έχουν 1 μόνο χτύπημα και υπολογίστηκαν ως " + str(STANDARD_HOURS) + " ώρες"
             " (εκτίμηση)."
         )
 
@@ -734,7 +773,8 @@ if uploaded_file is not None:
         else:
             manual_html = ""
 
-        html_content = html_template.replace("__REVIEW__", review_html)
+        html_content = html_template.replace("__STD__", str(STANDARD_HOURS))
+        html_content = html_content.replace("__REVIEW__", review_html)
         html_content = html_content.replace("__MANUAL__", manual_html)
         html_content = html_content.replace(
             "__MONTHLY_TABLE__",
@@ -801,5 +841,7 @@ if uploaded_file is not None:
                     + ". (Χρειάζεται: pip install reportlab)"
                 )
 
+    except InputError as e:
+        st.error(str(e))
     except Exception as e:
         st.error("Προέκυψε σφάλμα κατά την επεξεργασία: " + str(e))
