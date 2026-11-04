@@ -195,8 +195,21 @@ if uploaded_file is not None:
                 + "_"
                 + str(getattr(uploaded_file, "size", 0))
             )
+            def highlight_unresolved(row):
+                if str(row["Τι έγινε"]).startswith("Δεν υπολογίστηκε"):
+                    style = "background-color: #fdecea; color: #7b1f16"
+                else:
+                    style = ""
+                return [style] * len(row)
+
+            # Το χρώμα εφαρμόζεται στις στήλες που δεν επεξεργάζονται (πρώτες 5)
+            try:
+                editor_data = review_input.style.apply(highlight_unresolved, axis=1)
+            except Exception:
+                editor_data = review_input  # αν δεν υποστηρίζεται, χωρίς χρώμα
+
             edited = st.data_editor(
-                review_input,
+                editor_data,
                 key=editor_key,
                 hide_index=True,
                 use_container_width=True,
@@ -280,9 +293,6 @@ if uploaded_file is not None:
                 Hours_Decimal=("Hours_Decimal", "sum"),
                 Overtime_Decimal=("Overtime_Decimal", "sum"),
                 Weekend_Count=("Is_Weekend", "sum"),
-                Issue_Days=("Has_Issue", "sum"),
-                Single_Days=("Is_Single", "sum"),
-                Manual_Days=("Is_Manual", "sum"),
             )
             .reset_index()
         )
@@ -352,9 +362,6 @@ if uploaded_file is not None:
                 "Total_Hours": "Συνολικές Ώρες",
                 "Total_Overtime": "Συνολικές Ώρες Υπερωρίας",
                 "Weekend_Count": "Ημέρες Σ-Κ",
-                "Issue_Days": "Ημέρες με Πρόβλημα",
-                "Single_Days": "Ημέρες με 1 Χτύπημα (μέτρησαν 10 ώρες)",
-                "Manual_Days": "Ημέρες με Χειροκίνητη Διόρθωση",
             }
         )
 
