@@ -1,5 +1,7 @@
 import io
+import os
 from datetime import datetime, timedelta
+from xml.sax.saxutils import escape
 
 import pandas as pd
 import streamlit as st
@@ -7,6 +9,276 @@ import streamlit as st
 # Αν 2 εγγραφές της ίδιας μέρας απέχουν λιγότερο από αυτό (σε λεπτά),
 # θεωρούνται ύποπτες (π.χ. διπλό χτύπημα) και δεν υπολογίζονται.
 MIN_GAP_MINUTES = 30
+
+
+# ----------------------------------------------------------------------
+# PDF για εκτύπωση (χρειάζεται: pip install reportlab, και μια γραμματοσειρά
+# με ελληνικούς χαρακτήρες)
+# ----------------------------------------------------------------------
+def find_greek_font():
+    """Ψάχνει μια γραμματοσειρά TTF με ελληνικά. Επιστρέφει (κανονική, έντονη)."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base_dir = os.getcwd()
+    win = os.environ.get("WINDIR", "C:\\Windows")
+    pairs = [
+        # δίπλα στο app.py, φάκελος fonts (αν θες να βάλεις δική σου γραμματοσειρά)
+        (os.path.join(base_dir, "fonts", "DejaVuSans.ttf"),
+         os.path.join(base_dir, "fonts", "DejaVuSans-Bold.ttf")),
+        (os.path.join(win, "Fonts", "arial.ttf"), os.path.join(win, "Fonts", "arialbd.ttf")),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        ("/Library/Fonts/Arial.ttf", "/Library/Fonts/Arial Bold.ttf"),
+        ("/System/Library/Fonts/Supplemental/Arial.ttf",
+         "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    ]
+    try:
+        import matplotlib
+
+        ttf = os.path.join(matplotlib.get_data_path(), "fonts", "ttf")
+        pairs.append(
+            (os.path.join(ttf, "DejaVuSans.ttf"), os.path.join(ttf, "DejaVuSans-Bold.ttf"))
+        )
+    except Exception:
+        pass
+    for regular, bold in pairs:
+        if os.path.exists(regular):
+            return regular, (bold if os.path.exists(bold) else regular)
+    return None, None
+
+
+def build_pdf_report(review, manual_table, monthly, daily, n_issues, n_single, period):
+    """Δημιουργεί PDF (A4 οριζόντιο) για εκτύπωση και επιστρέφει τα bytes."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import (
+        KeepTogether,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    regular, bold = find_greek_font()
+    if regular is None:
+        raise RuntimeError(
+            "δεν βρέθηκε γραμματοσειρά με ελληνικά. Βάλε το DejaVuSans.ttf και το"
+            " DejaVuSans-Bold.ttf σε φάκελο «fonts» δίπλα στο app.py"
+        )
+    pdfmetrics.registerFont(TTFont("GR", regular))
+    pdfmetrics.registerFont(TTFont("GR-B", bold))
+    pdfmetrics.registerFontFamily("GR", normal="GR", bold="GR-B", italic="GR", boldItalic="GR-B")
+
+    page_w, page_h = landscape(A4)
+    margin = 28
+    width = page_w - 2 * margin
+
+    st_title = ParagraphStyle("t", fontName="GR-B", fontSize=15, leading=19, spaceAfter=2)
+    st_meta = ParagraphStyle("m", fontName="GR", fontSize=8.5, leading=11, textColor=colors.HexColor("#444444"))
+    st_h2 = ParagraphStyle("h2", fontName="GR-B", fontSize=11, leading=14, spaceBefore=10, spaceAfter=4)
+    st_cell = ParagraphStyle("c", fontName="GR", fontSize=8, leading=10)
+    st_head = ParagraphStyle("h", fontName="GR-B", fontSize=8, leading=10)
+    st_box = ParagraphStyle("b", fontName="GR", fontSize=8.5, leading=11)
+
+    def make_table(header, rows, fracs, row_bg=None):
+        data = [[Paragraph(escape(h), st_head) for h in header]]
+        for r in rows:
+            data.append([Paragraph(escape(str(c)), st_cell) for c in r])
+        t = Table(data, colWidths=[width * f for f in fracs], repeatRows=1)
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e8eb")),
+            ("LINEBELOW", (0, 0), (-1, 0), 1, colors.black),
+            ("LINEBELOW", (0, 1), (-1, -1), 0.4, colors.HexColor("#bbbbbb")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]
+        for i, bg in enumerate(row_bg or []):
+            if bg:
+                style.append(("BACKGROUND", (0, i + 1), (-1, i + 1), colors.HexColor(bg)))
+        t.setStyle(TableStyle(style))
+        return t
+
+    def box(text, bg, line):
+        t = Table([[Paragraph(text, st_box)]], colWidths=[width])
+        t.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg)),
+                    ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(line)),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        return t
+
+    story = [
+        Paragraph(escape("Αναφορά Ωρών Εργασίας & Υπερωριών"), st_title),
+        Paragraph(escape(period), st_meta),
+        Spacer(1, 8),
+    ]
+
+    # Ημέρες που χρειάζονται έλεγχο
+    if len(review) > 0:
+        if n_issues > 0:
+            story += [
+                box(
+                    "<b>Προσοχή:</b> " + escape(
+                        str(n_issues) + " ημέρες ΔΕΝ υπολογίστηκαν (πάνω από 2 εγγραφές ή 2"
+                        " εγγραφές πολύ κοντά μεταξύ τους) και δεν μπήκαν στα σύνολα."
+                    ),
+                    "#fdecea", "#c0392b",
+                ),
+                Spacer(1, 4),
+            ]
+        if n_single > 0:
+            story += [
+                box(
+                    "<b>Σημείωση:</b> " + escape(
+                        str(n_single) + " ημέρες έχουν 1 μόνο χτύπημα και υπολογίστηκαν ως"
+                        " 10 ώρες (εκτίμηση)."
+                    ),
+                    "#fff8e1", "#f39c12",
+                ),
+                Spacer(1, 4),
+            ]
+        story.append(Paragraph("Ημέρες που χρειάζονται έλεγχο", st_h2))
+        bg = [
+            "#fdecea" if str(x).startswith("Δεν υπολογίστηκε") else "#fff8e1"
+            for x in review["Τι έγινε"]
+        ]
+        story.append(
+            make_table(
+                list(review.columns),
+                review.values.tolist(),
+                [0.15, 0.11, 0.10, 0.24, 0.40],
+                bg,
+            )
+        )
+    else:
+        story.append(box("Δεν βρέθηκαν ημέρες που χρειάζονται έλεγχο.", "#eafaf1", "#27ae60"))
+
+    # Χειροκίνητες διορθώσεις
+    if len(manual_table) > 0:
+        story += [
+            Spacer(1, 6),
+            box(
+                "<b>Σημείωση:</b> " + escape(
+                    str(len(manual_table)) + " ημέρες έχουν ώρες που καταχωρήθηκαν"
+                    " χειροκίνητα και δεν προέρχονται από την κάρτα."
+                ),
+                "#e8f4fd", "#2980b9",
+            ),
+            Paragraph("Χειροκίνητες διορθώσεις", st_h2),
+            make_table(
+                list(manual_table.columns),
+                manual_table.values.tolist(),
+                [0.14, 0.10, 0.09, 0.20, 0.12, 0.14, 0.21],
+            ),
+        ]
+
+    # Μηνιαίο σύνολο
+    story.append(
+        KeepTogether(
+            [
+                Paragraph("Μηνιαίο Σύνολο Ανά Εργαζόμενο", st_h2),
+                make_table(
+                    list(monthly.columns),
+                    monthly.values.tolist(),
+                    [0.30, 0.14, 0.28, 0.28],
+                ),
+            ]
+        )
+    )
+
+    # Αναλυτική ημερήσια καταγραφή (σε νέα σελίδα)
+    def fmt_time(t, base_date):
+        if pd.isna(t):
+            return ""
+        txt = t.strftime("%H:%M")
+        if t.date() > base_date:
+            txt += " (+1)"
+        return txt
+
+    rows, row_bg = [], []
+    for _, r in daily.iterrows():
+        note = str(r["Παρατηρήσεις"])
+        rows.append(
+            [
+                r["Όνομα Εργαζομένου"],
+                str(r["Ημερομηνία"]),
+                r["Ημέρα"],
+                fmt_time(r["Ώρα Άφιξης"], r["Ημερομηνία"]),
+                fmt_time(r["Ώρα Αποχώρησης"], r["Ημερομηνία"]),
+                note,
+                r["Ώρες Εργασίας"],
+                r["Ώρες Υπερωρίας"],
+            ]
+        )
+        if note.startswith("ΠΡΟΣΟΧΗ"):
+            row_bg.append("#fdecea")
+        elif note.startswith("Χειροκίνητη"):
+            row_bg.append("#e8f4fd")
+        elif note != "":
+            row_bg.append("#fff8e1")
+        else:
+            row_bg.append(None)
+
+    story += [
+        PageBreak(),
+        Paragraph("Αναλυτική Ημερήσια Καταγραφή", st_h2),
+        Paragraph(
+            escape(
+                "Κόκκινο = δεν υπολογίστηκε, απαιτείται έλεγχος. Κίτρινο = εκτίμηση 10 ωρών"
+                " (1 μόνο χτύπημα). Μπλε = ώρες που καταχωρήθηκαν χειροκίνητα."
+                " (+1) = την επόμενη ημερολογιακή μέρα."
+            ),
+            st_meta,
+        ),
+        Spacer(1, 4),
+        make_table(
+            [
+                "Όνομα Εργαζομένου", "Ημερομηνία", "Ημέρα", "Ώρα Άφιξης",
+                "Ώρα Αποχώρησης", "Παρατηρήσεις", "Ώρες Εργασίας", "Ώρες Υπερωρίας",
+            ],
+            rows,
+            [0.12, 0.09, 0.09, 0.09, 0.10, 0.27, 0.12, 0.12],
+            row_bg,
+        ),
+    ]
+
+    def footer(canvas, doc_):
+        canvas.saveState()
+        canvas.setFont("GR", 8)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawRightString(page_w - margin, 14, "Σελίδα " + str(doc_.page))
+        canvas.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin + 6,
+        title="Αναφορά Ωρών Εργασίας & Υπερωριών",
+    )
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buf.getvalue()
+
 
 st.set_page_config(
     page_title="Αναφορά Ωρών Εργασίας & Υπερωριών", page_icon="⏱️", layout="wide"
@@ -489,12 +761,45 @@ if uploaded_file is not None:
         st.subheader("📅 Αναλυτική Ημερήσια Καταγραφή")
         st.dataframe(daily_summary_clean, use_container_width=True)
 
-        st.download_button(
-            label="Λήψη HTML Report",
-            data=html_content,
-            file_name="Work_and_Overtime_Summary.html",
-            mime="text/html",
-        )
+        # PDF για εκτύπωση (το HTML παραμένει όπως ήταν)
+        pdf_bytes, pdf_error = None, None
+        try:
+            if len(daily_summary) > 0:
+                period = (
+                    "Περίοδος: " + daily_summary["Date"].min().strftime("%d/%m/%Y")
+                    + " - " + daily_summary["Date"].max().strftime("%d/%m/%Y")
+                    + " | Δημιουργήθηκε: " + datetime.now().strftime("%d/%m/%Y %H:%M")
+                )
+            else:
+                period = "Δημιουργήθηκε: " + datetime.now().strftime("%d/%m/%Y %H:%M")
+            pdf_bytes = build_pdf_report(
+                review, manual_table, monthly_summary_clean, daily_summary_clean,
+                n_issues, n_single, period,
+            )
+        except Exception as pdf_exc:
+            pdf_error = str(pdf_exc)
+
+        col_html, col_pdf = st.columns(2)
+        with col_html:
+            st.download_button(
+                label="Λήψη HTML Report",
+                data=html_content,
+                file_name="Work_and_Overtime_Summary.html",
+                mime="text/html",
+            )
+        with col_pdf:
+            if pdf_bytes is not None:
+                st.download_button(
+                    label="🖨️ Λήψη PDF για εκτύπωση",
+                    data=pdf_bytes,
+                    file_name="Work_and_Overtime_Summary.pdf",
+                    mime="application/pdf",
+                )
+            else:
+                st.info(
+                    "Το PDF δεν ήταν δυνατό να δημιουργηθεί: " + str(pdf_error)
+                    + ". (Χρειάζεται: pip install reportlab)"
+                )
 
     except Exception as e:
         st.error("Προέκυψε σφάλμα κατά την επεξεργασία: " + str(e))
